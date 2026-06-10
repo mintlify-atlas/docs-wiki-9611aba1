@@ -16,7 +16,7 @@ domain/
   Cashier.java                 — m_cashiers entity
   CashierTransaction.java      — m_cashier_transactions entity
   TellerTransaction.java       — m_teller_transactions entity
-  TellerJournal.java           — journal data joined from GL
+  TellerJournal.java           — empty marker class (journal read data is in data/TellerJournalData.java)
   CashierTxnType.java          — cash movement enum (ALLOCATE, SETTLE, INWARD, OUTWARD)
   TellerStatus.java            — teller lifecycle enum
 api/
@@ -107,8 +107,8 @@ public class Cashier extends AbstractPersistableCustom<Long> {
     @Column(name = "end_date", nullable = false)
     private LocalDate endDate;
 
-    @Column(name = "is_full_day")
-    private boolean isFullDay;
+    @Column(name = "full_day", nullable = true)
+    private Boolean isFullDay;
     ...
 }
 ```
@@ -169,7 +169,7 @@ public final class CashierTxnType {
 sequenceDiagram
     participant Client as REST Client
     participant TAR as TellerApiResource
-    participant CWPS as CommandWritePlatformService
+    participant CWPS as PortfolioCommandSourceWritePlatformService
     participant Handler as CommandHandler
     participant DB as Database
 
@@ -235,7 +235,7 @@ Page<CashierTransactionData> retrieveCashierTransactions(
     String currencyCode,
     SearchParameters searchParameters);
 
-CashierTransactionsWithSummaryData retrieveCashierTransactionSummary(
+CashierTransactionsWithSummaryData retrieveCashierTransactionsWithSummary(
     Long cashierId,
     boolean includeAllTellers,
     LocalDate fromDate,

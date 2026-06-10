@@ -86,12 +86,12 @@ Permission codes follow the pattern `ACTION_ENTITYNAME` where `ACTION` is one of
 | `DELETE` | DELETE | `DELETE_HOOK` |
 | `APPROVE` | POST (command) | `APPROVE_LOANRESCHEDULE` |
 | `REJECT` | POST (command) | `REJECT_LOANRESCHEDULE` |
-| `ALL_FUNCTIONS` | — | Superuser wildcard (read + write) |
-| `ALL_FUNCTIONS_READ` | — | Read-only wildcard |
-| `ALL_FUNCTIONS_WRITE` | — | Write-only wildcard |
+| `ALL_FUNCTIONS` | — | Superuser wildcard — bypasses all service-layer and URL-level checks |
+| `ALL_FUNCTIONS_READ` | — | Read wildcard — also bypasses service-layer write checks (see note below) |
+| `ALL_FUNCTIONS_WRITE` | — | URL-level write wildcard — recognized only in `SecurityConfig` HTTP rules |
 | `BYPASS_TWOFACTOR` | — | Skip the 2FA second factor |
 
-The wildcard permissions (`ALL_FUNCTIONS`, `ALL_FUNCTIONS_READ`, `ALL_FUNCTIONS_WRITE`) short-circuit all individual permission checks. `hasAllFunctionsPermission()` is called first inside every `AppUser.hasPermissionTo()` invocation.
+`ALL_FUNCTIONS` and `ALL_FUNCTIONS_READ` are both checked inside the private `validateHasPermission` method that backs every `validateHasReadPermission`, `validateHasCreatePermission`, `validateHasUpdatePermission`, and `validateHasDeletePermission` call. This means holding `ALL_FUNCTIONS_READ` is sufficient to pass **all** service-layer imperative checks, including write operations. `ALL_FUNCTIONS_WRITE` is recognized only at the HTTP URL-level in `SecurityConfig` (e.g. `hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_CURRENCY")`) and is never evaluated by `AppUser.validateHasPermission`. `hasAllFunctionsPermission()` — a private helper that tests only `ALL_FUNCTIONS` — is called first inside the private `hasPermissionTo()` method to short-circuit role iteration when the superuser permission is present.
 
 ## Runtime permission check paths
 
@@ -113,11 +113,15 @@ These convenience methods are defined on `AppUser` and delegate to a private `va
 ```java
 // AppUser.java
 private void validateHasPermission(final String prefix, final String resourceType) {
-    final String matchPermission = prefix + "_" + resourceType.toUpperCase(Locale.ROOT);
+    final String authorizationMessage = "User has no authority to " + prefix + " "
+        + resourceType.toLowerCase(java.util.Locale.ROOT) + "s";
+    final String matchPermission = prefix + "_" + resourceType.toUpperCase(java.util.Locale.ROOT);
+
     if (!hasNotPermissionForAnyOf("ALL_FUNCTIONS", "ALL_FUNCTIONS_READ", matchPermission)) {
         return;
     }
-    throw new NoAuthorizationException("User has no authority to " + prefix + " " + resourceType.toLowerCase(Locale.ROOT) + "s");
+
+    throw new NoAuthorizationException(authorizationMessage);
 }
 ```
 

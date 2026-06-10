@@ -37,7 +37,7 @@ public class LoanOriginator extends AbstractAuditableWithUTCDateTimeCustom<Long>
 }
 ```
 
-`LoanOriginatorStatus` is an enum (`ACTIVE` / `INACTIVE`) that controls whether an originator can be attached to new loans—validated by `LoanOriginatorNotActiveException`.
+`LoanOriginatorStatus` is an enum (`ACTIVE` / `PENDING` / `INACTIVE`) that controls whether an originator can be attached to new loans—validated by `LoanOriginatorNotActiveException` (when an originator is not `ACTIVE`) or `LoanOriginatorInvalidStatusException` (when an unrecognised status string is supplied).
 
 ### `LoanOriginatorMapping`
 
@@ -153,7 +153,7 @@ Class<T> getDataType();
 void enrich(T data);
 ```
 
-The origination module registers five enrichers, all conditional on the feature flag:
+The origination module registers six enrichers, all conditional on the feature flag:
 
 | Enricher | Data type enriched |
 |---|---|
@@ -198,10 +198,12 @@ public class LoanAccountDataV1OriginatorEnricher implements DataEnricher<LoanAcc
 | Exception | Thrown when |
 |---|---|
 | `LoanOriginatorNotFoundException` | Requested originator ID does not exist |
-| `LoanOriginatorNotActiveException` | Originator is `INACTIVE`; cannot attach to new loans |
+| `LoanOriginatorNotActiveException` | Originator is not `ACTIVE`; cannot attach to new loans |
+| `LoanOriginatorInvalidStatusException` | An unrecognised status string is supplied (valid values: `ACTIVE`, `PENDING`, `INACTIVE`) |
 | `LoanOriginatorDuplicateExternalIdException` | `externalId` already in use |
 | `LoanOriginatorMappingAlreadyExistsException` | Loan is already mapped to this originator |
 | `LoanOriginatorMappingNotFoundException` | Mapping to detach does not exist |
+| `LoanOriginatorCannotBeDeletedException` | Originator cannot be deleted (e.g., it is still referenced by a loan mapping) |
 | `LoanOriginatorCreationNotAllowedException` | Feature is disabled or rate-limiting rule violated |
 | `LoanNotInSubmittedStatusException` | Loan must be in `SUBMITTED_AND_PENDING_APPROVAL` to attach originator |
 

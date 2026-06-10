@@ -270,7 +270,7 @@ public class ReportingProcessServiceProvider {
 }
 ```
 
-The `@ReportService(type = {"Table"})` annotation on each implementation is the registration mechanism.
+The `@ReportService(type = {...})` annotation on each implementation is the registration mechanism. For example, `DatatableReportingProcessService` is annotated `@ReportService(type = {"Table", "Chart", "SMS"})` to handle all three standard report types.
 
 ### Built-in Export Services
 

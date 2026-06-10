@@ -96,23 +96,23 @@ The `/api/v1/authentication` REST endpoint (`AuthenticationApiResource.java`) pr
 ```mermaid
 sequenceDiagram
     participant Client
-    participant TenantFilter as TenantAwareBasic<br/>AuthenticationFilter
-    participant AuthManager as AuthenticationManager<br/>(ProviderManager)
-    participant UDS as TenantAwareJpa<br/>UserDetailsService
-    participant DB as Tenant DB<br/>(m_appuser)
+    participant TenantFilter as TenantAwareBasicAuthenticationFilter
+    participant AuthManager as AuthenticationManager (ProviderManager)
+    participant UDS as TenantAwareJpaPlatformUserDetailsService
+    participant DB as Tenant DB (m_appuser)
     participant SC as SecurityContext
 
-    Client->>TenantFilter: HTTP request<br/>Fineract-Platform-TenantId: default<br/>Authorization: Basic <base64>
-    TenantFilter->>TenantFilter: Load tenant → ThreadLocalContextUtil
-    TenantFilter->>AuthManager: authenticate(UsernamePassword token)
+    Client->>TenantFilter: HTTP request + Fineract-Platform-TenantId + Authorization Basic
+    TenantFilter->>TenantFilter: Load tenant into ThreadLocalContextUtil
+    TenantFilter->>AuthManager: authenticate(UsernamePasswordAuthenticationToken)
     AuthManager->>UDS: loadUserByUsername(username)
-    UDS->>DB: SELECT * FROM m_appuser WHERE username=? AND enabled=1
+    UDS->>DB: SELECT from m_appuser WHERE username=? AND enabled=1
     DB-->>UDS: AppUser row
     UDS-->>AuthManager: AppUser (UserDetails)
     AuthManager->>AuthManager: verify password hash
     AuthManager-->>TenantFilter: authenticated Authentication
     TenantFilter->>SC: SecurityContextHolder.setAuthentication()
-    TenantFilter-->>Client: 200 OK (X-Notification-Refresh header)
+    TenantFilter-->>Client: 200 OK with X-Notification-Refresh header
 ```
 
 ## OAuth2 Authorization Server mode

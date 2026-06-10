@@ -12,9 +12,9 @@ The module root is `fineract-core/src/main/java/org/apache/fineract/` and its pr
 
 All persistent entities in Fineract inherit from one of two base classes defined in `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/domain/`.
 
-### `AbstractPersistableCustom<ID>`
+### `AbstractPersistableCustom<T extends Serializable>`
 
-A Lombok-free JPA `@MappedSuperclass` that provides a single surrogate `id` column (type `Long`) and implements `equals` / `hashCode` based on entity identity. Every entity table in Fineract has a `BIGINT` primary key named `id` backed by a sequence.
+A JPA `@MappedSuperclass` (using Lombok `@Getter`, `@Setter`, `@NoArgsConstructor`) that provides a single surrogate `id` column and implements `Persistable<T>`. The ID column uses `GenerationType.IDENTITY` (database auto-increment). Note that `equals` / `hashCode` are deliberately **not** implemented on this base class to avoid issues with JPA proxies — subclasses provide their own equality semantics where needed.
 
 ### `AbstractAuditableCustom`
 
@@ -62,6 +62,7 @@ The module docstring on `AbstractAuditableCustom` says "Make sure to modify the 
 
 ```java
 // ThreadLocalContextUtil.java
+private static final ThreadLocal<String> contextHolder = new ThreadLocal<>();         // data source context ("ro" for read-only)
 private static final ThreadLocal<FineractPlatformTenant> tenantContext = new ThreadLocal<>();
 private static final ThreadLocal<String> authTokenContext = new ThreadLocal<>();
 private static final ThreadLocal<HashMap<BusinessDateType, LocalDate>> businessDateContext = new ThreadLocal<>();

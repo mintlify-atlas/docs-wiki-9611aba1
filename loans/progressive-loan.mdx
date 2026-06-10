@@ -47,7 +47,7 @@ fineract-progressive-loan/
     └── loanproduct/
         └── calc/
             ├── EMICalculator.java                 # Interface
-            ├── EMICalculatorImpl.java
+            ├── ProgressiveEMICalculator.java      # Implementation
             └── data/
                 ├── ProgressiveLoanInterestScheduleModel.java
                 ├── RepaymentPeriod.java
@@ -105,7 +105,7 @@ void addCapitalizedIncome(ProgressiveLoanInterestScheduleModel scheduleModel,
 void addInterestRateChange(ProgressiveLoanInterestScheduleModel scheduleModel, ...);
 ```
 
-The default implementation is `EMICalculatorImpl` (also in `fineract-progressive-loan`). It uses the standard annuity formula with configurable rounding (`installmentAmountInMultiplesOf`) and the `MathContext` from the currency configuration.
+The default implementation is `ProgressiveEMICalculator` (also in `fineract-progressive-loan`). It uses the standard annuity formula with configurable rounding (`installmentAmountInMultiplesOf`) and the `MathContext` from the currency configuration.
 
 ## `ProgressiveLoanScheduleGenerator`
 

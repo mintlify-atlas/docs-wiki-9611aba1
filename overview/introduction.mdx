@@ -72,13 +72,13 @@ The simplest path from source to running service is:
       --fineract.tenant.username=root \
       --fineract.tenant.password=postgres
     ```
-    The server starts on port `8080`. The Swagger UI is available at `/fineract-provider/api-docs`.
+    The server starts on port `8443` (HTTPS) by default — `server.port` defaults to `${FINERACT_SERVER_PORT:8443}` with SSL enabled (`server.ssl.enabled=true`). The servlet context path is `/fineract-provider` (`${FINERACT_SERVER_SERVLET_CONTEXT_PATH:/fineract-provider}`), so the Swagger UI is available at `/fineract-provider/api-docs`.
   </Step>
   <Step title="Verify the default tenant">
     ```bash
-    curl -u mifos:password \
+    curl -k -u mifos:password \
       -H "Fineract-Platform-TenantId: default" \
-      http://localhost:8080/fineract-provider/api/v1/offices
+      https://localhost:8443/fineract-provider/api/v1/offices
     ```
   </Step>
 </Steps>
@@ -92,6 +92,15 @@ public class ServerApplication extends SpringBootServletInitializer {
     @Import({ FineractWebApplicationConfiguration.class,
               FineractLiquibaseOnlyApplicationConfiguration.class })
     private static final class Configuration {}
+
+    @Override
+    protected SpringApplicationBuilder configure(SpringApplicationBuilder builder) {
+        return configureApplication(builder);
+    }
+
+    private static SpringApplicationBuilder configureApplication(SpringApplicationBuilder builder) {
+        return builder.sources(Configuration.class);
+    }
 
     public static void main(String[] args) throws IOException {
         configureApplication(new SpringApplicationBuilder(ServerApplication.class)).run(args);

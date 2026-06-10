@@ -56,7 +56,7 @@ public class LoanRepaymentCommandHandler implements NewCommandSourceHandler {
 }
 ```
 
-At startup, `CommandHandlerProvider.afterPropertiesSet()` calls `applicationContext.getBeansWithAnnotation(CommandType.class)` and registers each handler in a `HashMap<String, String>` keyed on `"entity|action"` (the bean name as the value). At dispatch time, `getHandler(entity, action)` returns the bean name, and the handler is retrieved from the context with `applicationContext.getBean(beanName)`.
+At startup, `CommandHandlerProvider.afterPropertiesSet()` calls `applicationContext.getBeanNamesForAnnotation(CommandType.class)` and registers each handler in a `HashMap<String, String>` keyed on `"entity|action"` (the bean name as the value). At dispatch time, `getHandler(entity, action)` returns the bean name, and the handler is retrieved from the context with `applicationContext.getBean(beanName)`.
 
 ```java
 // CommandType.java

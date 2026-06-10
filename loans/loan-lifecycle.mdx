@@ -4,7 +4,7 @@ sidebarTitle: "Loan Lifecycle"
 description: "Complete walkthrough of all loan states in LoanStatus, the events that drive transitions via DefaultLoanLifecycleStateMachine, and every LoanTransactionType."
 ---
 
-A loan in Apache Fineract moves through a well-defined state machine from the moment an applicant submits an application to the point the obligation is extinguished—either by full repayment, write-off, or rescheduling. Every state is an integer in `LoanStatus` (`fineract-core/.../domain/LoanStatus.java`); transitions are orchestrated by `DefaultLoanLifecycleStateMachine` (`fineract-loan/.../domain/DefaultLoanLifecycleStateMachine.java`). API calls arrive as commands, are validated by `LoanApplicationValidator` or `LoanDisbursementValidator`, then dispatched to `LoanApplicationWritePlatformServiceJpaRepositoryImpl` or `LoanWritePlatformServiceJpaStrategyImpl` in `fineract-provider`.
+A loan in Apache Fineract moves through a well-defined state machine from the moment an applicant submits an application to the point the obligation is extinguished—either by full repayment, write-off, or rescheduling. Every state is an integer in `LoanStatus` (`fineract-core/.../domain/LoanStatus.java`); transitions are orchestrated by `DefaultLoanLifecycleStateMachine` (`fineract-loan/.../domain/DefaultLoanLifecycleStateMachine.java`). API calls arrive as commands, are validated by `LoanApplicationValidator` or `LoanDisbursementValidator`, then dispatched to `LoanApplicationWritePlatformServiceJpaRepositoryImpl` or `LoanWritePlatformServiceJpaRepositoryImpl` in `fineract-provider`.
 
 ## State diagram
 
@@ -18,9 +18,9 @@ stateDiagram-v2
     APPROVED --> ACTIVE : disburseLoan()
     ACTIVE --> ACTIVE : repayment / waiveInterest / chargePayment
     ACTIVE --> TRANSFER_IN_PROGRESS : initiateLoanTransfer()
-    TRANSFER_IN_PROGRESS --> TRANSFER_ON_HOLD : acceptLoanTransfer()
+    TRANSFER_IN_PROGRESS --> TRANSFER_ON_HOLD : rejectLoanTransfer()
     TRANSFER_IN_PROGRESS --> ACTIVE : withdrawLoanTransfer()
-    TRANSFER_ON_HOLD --> ACTIVE : acceptLoanTransfer() [complete]
+    TRANSFER_IN_PROGRESS --> ACTIVE : acceptLoanTransfer()
     ACTIVE --> OVERPAID : LOAN_OVERPAYMENT event
     OVERPAID --> ACTIVE : creditBalanceRefund()
     ACTIVE --> CLOSED_OBLIGATIONS_MET : REPAID_IN_FULL event
@@ -40,7 +40,7 @@ Defined in `fineract-core/src/main/java/org/apache/fineract/portfolio/loanaccoun
 | `APPROVED` | 200 | Underwriter signed off; funds not yet released |
 | `ACTIVE` | 300 | At least one disbursement posted |
 | `TRANSFER_IN_PROGRESS` | 303 | Inter-office transfer started |
-| `TRANSFER_ON_HOLD` | 304 | Transfer accepted by destination, pending completion |
+| `TRANSFER_ON_HOLD` | 304 | Transfer rejected by destination; loan held pending resolution |
 | `WITHDRAWN_BY_CLIENT` | 400 | Applicant cancelled before approval |
 | `REJECTED` | 500 | Underwriter declined |
 | `CLOSED_OBLIGATIONS_MET` | 600 | All outstanding principal, interest, and fees paid |
@@ -101,7 +101,7 @@ CommandProcessingResult makeLoanRepayment(
     Long loanId, JsonCommand command, boolean isRecoveryRepayment);
 ```
 
-The `repaymentTransactionType` argument may be `REPAYMENT(2)`, `MERCHANT_ISSUED_REFUND(21)`, `PAYOUT_REFUND(22)`, `GOODWILL_CREDIT(23)`, or any other type that `LoanTransactionType.isRepaymentType()` returns `true` for. After the transaction is persisted, the repayment schedule transaction processor (classic or `AdvancedPaymentScheduleTransactionProcessor`) allocates funds across installments, and `DefaultLoanLifecycleStateMachine.determineAndTransition` checks whether the loan is now fully paid.
+The `repaymentTransactionType` argument may be `REPAYMENT(2)`, `MERCHANT_ISSUED_REFUND(21)`, `PAYOUT_REFUND(22)`, `GOODWILL_CREDIT(23)`, `CHARGE_REFUND(24)`, `DOWN_PAYMENT(28)`, `INTEREST_PAYMENT_WAIVER(31)`, or any other type that `LoanTransactionType.isRepaymentType()` returns `true` for. After the transaction is persisted, the repayment schedule transaction processor (classic or `AdvancedPaymentScheduleTransactionProcessor`) allocates funds across installments, and `DefaultLoanLifecycleStateMachine.determineAndTransition` checks whether the loan is now fully paid.
 
 ### Write-off
 
@@ -134,7 +134,7 @@ CommandProcessingResult closeLoan(Long loanId, JsonCommand command);
 CommandProcessingResult closeAsRescheduled(Long loanId, JsonCommand command);
 ```
 
-`closeLoan` fires `LOAN_CLOSED` → `CLOSED_OBLIGATIONS_MET(600)`. `closeAsRescheduled` fires `LOAN_RESCHEDULE` → `CLOSED_RESCHEDULE_OUTSTANDING_AMOUNT(602)` and posts a `MARKED_FOR_RESCHEDULING(7)` transaction.
+`closeLoan` fires `REPAID_IN_FULL` → `CLOSED_OBLIGATIONS_MET(600)`. `closeAsRescheduled` fires `LOAN_RESCHEDULE` → `CLOSED_RESCHEDULE_OUTSTANDING_AMOUNT(602)` and posts a `MARKED_FOR_RESCHEDULING(7)` transaction.
 
 ## Transaction type reference
 

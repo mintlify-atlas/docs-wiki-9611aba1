@@ -17,13 +17,13 @@ fineract-savings/src/main/java/org/apache/fineract/portfolio/savings/
 │   ├── SavingsAccountCharge.java            # Charges attached to an account
 │   ├── SavingsAccountSummary.java           # Denormalised running totals
 │   ├── FixedDepositProduct.java             # FD product (extends SavingsProduct)
-│   ├── RecurringDepositProduct.java         # RD product (extends SavingsProduct)
-│   └── interest/                            # Interest calculation engine
-├── service/
-│   ├── SavingsAccountWritePlatformService.java
-│   └── SavingsAccountReadPlatformService.java
-└── cob/savings/
-    └── SavingsCOBBusinessStep.java          # Marker interface for COB steps
+│   └── RecurringDepositProduct.java         # RD product (extends SavingsProduct)
+└── service/
+    ├── SavingsAccountWritePlatformService.java
+    └── SavingsAccountReadPlatformService.java
+
+fineract-savings/src/main/java/org/apache/fineract/cob/savings/
+└── SavingsCOBBusinessStep.java              # Marker interface for COB steps
 ```
 
 The `fineract-provider` module contributes the JPA assemblers, domain-service implementations, and REST API resources at:
@@ -196,7 +196,7 @@ Each transaction stores:
 
 ## Interest Calculation and Posting
 
-Interest is calculated in-memory by the `PostingPeriod` engine (`fineract-savings/.../savings/domain/interest/PostingPeriod.java`). The engine:
+Interest is calculated in-memory by the `PostingPeriod` engine (`fineract-core/.../savings/domain/interest/PostingPeriod.java`). The engine:
 
 1. Iterates all non-reversed transactions ordered by date.
 2. Computes end-of-day balances for each day in the posting period.

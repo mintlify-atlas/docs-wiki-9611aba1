@@ -1,7 +1,7 @@
 ---
-title: "Apache Fineract: Core Banking Platform"
+title: "Apache Fineract: Open-Source Core Banking Platform"
 sidebarTitle: "Home"
-description: "Internal engineering reference for Apache Fineract — a multi-tenant core banking platform built on Spring Boot providing REST APIs for loans, savings, accounting, and financial services."
+description: "Engineering reference for Apache Fineract — a multi-tenant core banking platform on Spring Boot with REST APIs for loans, savings, and accounting."
 ---
 
 Apache Fineract is an open-source core banking platform built on Spring Boot 3.5, Spring Security, Spring Batch, and JPA/Hibernate. It is deployed as a self-contained JAR (or WAR) and exposes a Jersey (JAX-RS) REST API over HTTPS. The platform is architected as a **multi-module Gradle project** (~35 modules) organized around a command pattern, a multi-tenant data isolation model, and a Spring Batch–driven Close of Business (COB) pipeline. It is designed for financial inclusion — serving MFIs, cooperatives, and digital banks targeting underserved populations.
@@ -12,24 +12,25 @@ Apache Fineract is an open-source core banking platform built on Spring Boot 3.5
 graph TB
     subgraph Clients
         RC[REST Client]
-        FC[fineract-client<br/>OpenAPI Java Client]
-        FF[fineract-client-feign<br/>Feign Client]
+        FC["fineract-client (OpenAPI Java Client)"]
+        FF["fineract-client-feign (Feign Client)"]
     end
 
     subgraph API["API Layer (fineract-provider)"]
-        JA[Jersey JAX-RS<br/>ApiResources]
-        BA[Batch API<br/>BatchApiResource]
-        SA[Spring Security<br/>Filter Chain]
+        JA["Jersey JAX-RS ApiResources"]
+        BA["Batch API BatchApiResource"]
+        SA["Spring Security Filter Chain"]
     end
 
     subgraph CMD["Command Bus (fineract-core / fineract-command)"]
         CP[CommandProcessingService]
         CH[CommandHandlers]
-        MK[Maker-Checker<br/>Audit Log]
+        MK["Maker-Checker Audit Log"]
     end
 
     subgraph Domain["Domain Modules"]
-        LN[fineract-loan<br/>+ progressive-loan]
+        LN[fineract-loan]
+        PL[fineract-progressive-loan]
         SV[fineract-savings]
         AC[fineract-accounting]
         CH2[fineract-charge]
@@ -38,10 +39,10 @@ graph TB
     end
 
     subgraph Infra["Infrastructure (fineract-core)"]
-        MT[Multi-Tenancy<br/>DataSourcePerTenant]
-        EV[External Events<br/>Kafka / JMS]
-        JB[Spring Batch<br/>COB Pipeline]
-        DB[(PostgreSQL<br/>per tenant)]
+        MT["Multi-Tenancy DataSourcePerTenant"]
+        EV["External Events (Kafka / JMS)"]
+        JB["Spring Batch COB Pipeline (fineract-cob)"]
+        DB[("PostgreSQL per tenant")]
     end
 
     RC --> SA
@@ -53,12 +54,14 @@ graph TB
     BA --> CP
     CP --> CH
     CH --> LN
+    CH --> PL
     CH --> SV
     CH --> AC
     CH --> CH2
     CH --> TX
     CH --> IV
     LN --> DB
+    PL --> DB
     SV --> DB
     AC --> DB
     JB --> LN

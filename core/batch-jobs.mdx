@@ -60,23 +60,36 @@ All job names are enumerated in `JobName` (in `fineract-core/src/main/java/org/a
 | `WORKING_CAPITAL_LOAN_COB_JOB` | `Working Capital Loan COB` | COB for working capital loans |
 | `UPDATE_LOAN_ARREARS_AGEING` | `Update Loan Arrears Ageing` | Recomputes arrears ageing buckets |
 | `APPLY_ANNUAL_FEE_FOR_SAVINGS` | `Apply Annual Fee For Savings` | Posts annual fee charges |
+| `APPLY_HOLIDAYS_TO_LOANS` | `Apply Holidays To Loans` | Applies public holiday adjustments to loan schedules |
 | `POST_INTEREST_FOR_SAVINGS` | `Post Interest For Savings` | Calculates and posts savings interest |
+| `TRANSFER_FEE_CHARGE_FOR_LOANS` | `Transfer Fee For Loans From Savings` | Transfers fee charges for loans from linked savings |
+| `ACCOUNTING_RUNNING_BALANCE_UPDATE` | `Update Accounting Running Balances` | Recalculates GL account running balances |
+| `PAY_DUE_SAVINGS_CHARGES` | `Pay Due Savings Charges` | Posts due charges on savings accounts |
 | `ADD_ACCRUAL_ENTRIES` | `Add Accrual Transactions` | Non-periodic accrual posting |
 | `ADD_PERIODIC_ACCRUAL_ENTRIES` | `Add Periodic Accrual Transactions` | Periodic accrual posting |
+| `ADD_PERIODIC_ACCRUAL_ENTRIES_FOR_LOANS_WITH_INCOME_POSTED_AS_TRANSACTIONS` | `Add Accrual Transactions For Loans With Income Posted As Transactions` | Accrual posting for income-as-transaction loans |
+| `ADD_PERIODIC_ACCRUAL_ENTRIES_FOR_SAVINGS_WITH_INCOME_POSTED_AS_TRANSACTIONS` | `Add Accrual Transactions For Savings` | Accrual posting for savings with income posted as transactions |
 | `ACCRUAL_ACTIVITY_POSTING` | `Accrual Activity Posting` | Activity-based accrual posting |
 | `UPDATE_NPA` | `Update Non Performing Assets` | Reclassifies loans as NPA/performing |
 | `APPLY_CHARGE_TO_OVERDUE_LOAN_INSTALLMENT` | `Apply penalty to overdue loans` | Applies overdue penalty charges |
 | `EXECUTE_STANDING_INSTRUCTIONS` | `Execute Standing Instruction` | Processes standing payment orders |
 | `RECALCULATE_INTEREST_FOR_LOAN` | `Recalculate Interest For Loans` | Re-runs interest on variable rate loans |
+| `GENERATE_RD_SCEHDULE` | `Generate Mandatory Savings Schedule` | Generates recurring deposit instalment schedules |
+| `GENERATE_LOANLOSS_PROVISIONING` | `Generate Loan Loss Provisioning` | Computes loan loss provisioning |
+| `POST_DIVIDENTS_FOR_SHARES` | `Post Dividends For Shares` | Posts declared dividends for share products |
+| `UPDATE_SAVINGS_DORMANT_ACCOUNTS` | `Update Savings Dormant Accounts` | Marks savings accounts as dormant |
+| `EXECUTE_REPORT_MAILING_JOBS` | `Execute Report Mailing Jobs` | Runs and emails scheduled reports |
+| `UPDATE_TRIAL_BALANCE_DETAILS` | `Update Trial Balance Details` | Refreshes trial balance summary data |
 | `SEND_ASYNCHRONOUS_EVENTS` | `Send Asynchronous Events` | Relays `m_external_event` rows to broker |
 | `PURGE_EXTERNAL_EVENTS` | `Purge External Events` | Removes old sent external event rows |
 | `PURGE_PROCESSED_COMMANDS` | `Purge Processed Commands` | Cleans `m_portfolio_command_source` |
-| `INCREASE_BUSINESS_DATE_BY_1_DAY` | `Increase Business Date by 1 day` | Advances the business date for testing |
+| `INCREASE_BUSINESS_DATE_BY_1_DAY` | `Increase Business Date by 1 day` | Advances the business date (testing/non-production only) |
+| `INCREASE_COB_DATE_BY_1_DAY` | `Increase COB Date by 1 day` | Advances the COB date (testing/non-production only) |
 | `EXECUTE_DIRTY_JOBS` | `Execute All Dirty Jobs` | Runs jobs that failed and need retry |
 | `LOAN_DELINQUENCY_CLASSIFICATION` | `Loan Delinquency Classification` | Assigns delinquency bands to loans |
 | `JOURNAL_ENTRY_AGGREGATION` | `Journal Entry Aggregation` | Aggregates granular journal entries |
 | `UPDATE_DEPOSITS_ACCOUNT_MATURITY_DETAILS` | `Update Deposit Accounts Maturity details` | Processes maturing fixed deposits |
-| `GENERATE_LOANLOSS_PROVISIONING` | `Generate Loan Loss Provisioning` | Computes loan loss provisioning |
+| `TRANSFER_INTEREST_TO_SAVINGS` | `Transfer Interest To Savings` | Transfers accrued interest to linked savings accounts |
 
 ## Scheduler Read and Write Services
 
@@ -88,6 +101,7 @@ public interface SchedulerJobRunnerReadService {
     JobDetailData retrieveOne(@NonNull IdTypeResolver.IdType idType, String identifier);
     Page<JobDetailHistoryData> retrieveJobHistory(@NonNull IdTypeResolver.IdType idType,
             String identifier, SearchParameters searchParameters);
+    @NonNull Long retrieveId(@NonNull IdTypeResolver.IdType idType, String identifier);
     boolean isUpdatesAllowed();
 }
 ```

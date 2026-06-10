@@ -31,7 +31,6 @@ Apache Fineract is a Gradle multi-project build. All subprojects are enumerated 
 | `fineract-tax` | Tax components, tax groups, tax mapping to products | `org.apache.fineract.portfolio.tax` |
 | `fineract-rates` | Floating rate definitions and rate periods | `org.apache.fineract.portfolio.floatingrates` |
 | `fineract-investor` | External asset owner / investor management, portfolio transfer | `org.apache.fineract.investor` |
-| `fineract-accounting` | GL accounts, journal entries, periodic accruals, accounting rules | `org.apache.fineract.accounting` |
 | `fineract-branch` | Office hierarchy (branches), staff management | `org.apache.fineract.organisation.office` |
 | `fineract-document` | Document storage metadata (file attachments on entities) | `org.apache.fineract.infrastructure.documentmanagement` |
 | `fineract-report` | Pentaho / JDBC-backed report engine, report mailing, stretch reporting | `org.apache.fineract.infrastructure.report` |
@@ -40,8 +39,8 @@ Apache Fineract is a Gradle multi-project build. All subprojects are enumerated 
 | `fineract-provider` | The deployable Spring Boot application: assembles all modules, Jersey config, batch job config, Spring Integration config, `application.properties` | `org.apache.fineract` |
 | `fineract-war` | WAR packaging artifact for traditional servlet container deployment | N/A (packaging only) |
 | `fineract-client` | Auto-generated OpenAPI Java client library | `org.apache.fineract.client` |
-| `fineract-client-feign` | Feign-based client wrappers around `fineract-client` | `org.apache.fineract.client.feign` |
-| `fineract-doc` | AsciiDoc / OpenAPI documentation generation tasks | N/A (doc generation) |
+| `fineract-client-feign` | Feign-based REST client wrappers built on top of `fineract-client` | `org.apache.fineract.client.feign` |
+| `fineract-doc` | OpenAPI / documentation generation Gradle tasks; produces `fineract.json` and related artifacts | N/A (build tooling) |
 | `integration-tests` | Full-stack integration tests against a running Fineract instance | `org.apache.fineract.integrationtests` |
 | `twofactor-tests` | 2FA-specific integration tests | `org.apache.fineract.integrationtests` |
 | `oauth2-tests` | OAuth2/OIDC integration tests | `org.apache.fineract.integrationtests` |

@@ -127,7 +127,12 @@ public class CommandStrategyProvider {
 
     private static final Map<CommandContext, String> commandStrategies = new ConcurrentHashMap<>();
 
-    static void init() {
+    public CommandStrategyProvider(final ApplicationContext applicationContext) {
+        init();
+        this.applicationContext = applicationContext;
+    }
+
+    private static void init() {
         commandStrategies.put(
             CommandContext.resource("v1\\/clients").method(POST).build(),
             "createClientCommandStrategy");
@@ -207,7 +212,7 @@ Each root request (and its dependency subtree) runs in its own transaction via `
 
 All sub-requests execute inside a single `TransactionTemplate`. `BatchApiServiceImpl` uses `callInTransaction()` which wraps the execution in a transaction configured at `PROPAGATION_REQUIRED`. If any sub-request raises an exception, `BatchExecutionException` is thrown, the transaction is rolled back, and a single error response (HTTP 400) is returned for the entire batch. The error body contains details from the first failing request.
 
-`BatchExecutionException` (`fineract-core/src/main/java/org/apache/fineract/batch/service/BatchExecutionException.java`) carries the `BatchResponse` of the failed step so callers can identify which sub-request caused the rollback.
+`BatchExecutionException` (`fineract-core/src/main/java/org/apache/fineract/batch/service/BatchExecutionException.java`) carries the `BatchRequest` of the failed step so callers can identify which sub-request caused the rollback.
 
 Retry logic is present for the enclosing-transaction path: `RetryConfigurationAssembler.getRetryConfigurationForBatchApiWithEnclosingTransaction()` configures Resilience4j retry for `ConcurrencyFailureException` (e.g., deadlocks at `REPEATABLE_READ` isolation).
 
@@ -240,7 +245,7 @@ public class BatchReferenceInvalidException extends AbstractPlatformDomainRuleEx
 
 ## Available CommandStrategy Implementations
 
-The `fineract-provider` module registers ~60+ strategies in `CommandStrategyProvider.init()`. A representative sample:
+The `fineract-core` module registers ~60+ strategies in the private `CommandStrategyProvider.init()` method invoked from the constructor. A representative sample:
 
 | Pattern | Method | Strategy Bean |
 |---|---|---|

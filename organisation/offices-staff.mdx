@@ -37,7 +37,7 @@ Key entity fields:
 | `external_id` | `ExternalId externalId` | Optional, unique (`externalid_org`) |
 | `parent_id` | `Office parent` | `null` for root; enforced in `RootOfficeParentCannotBeUpdated` |
 
-The `children` association (`@OneToMany(fetch = FetchType.LAZY, @JoinColumn(name = "parent_id")`) is lazy-loaded. Code that needs to walk the full tree must call `loadLazyCollections()` first.
+The `children` association (`@OneToMany(fetch = FetchType.LAZY)` paired with `@JoinColumn(name = "parent_id")`) is lazy-loaded. Code that needs to walk the full tree must call `loadLazyCollections()` first.
 
 ### Office Hierarchy Diagram
 
@@ -143,10 +143,12 @@ public class StaffApiResource {
     ...
 
     @POST
-    public StaffCreateResponse createStaff(@RequestBody @Valid StaffCreateRequest request) {
+    @Consumes({ MediaType.APPLICATION_JSON })
+    public StaffCreateResponse createStaff(@RequestBody(required = true) @Valid StaffCreateRequest request) {
         final var command = new StaffCreateCommand();
         command.setPayload(request);
-        return dispatcher.dispatch(command).get();
+        final Supplier<StaffCreateResponse> response = dispatcher.dispatch(command);
+        return response.get();
     }
 }
 ```
@@ -174,7 +176,7 @@ The `CurrenciesApiResource` (`fineract-core/src/main/java/org/apache/fineract/or
 
 ## Working Days
 
-`WorkingDays` (`fineract-core/src/main/java/org/apache/fineract/organisation/workingdays/domain/WorkingDays.java`) stores a recurrence rule string (e.g., `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR`) that defines which days of the week are working days. The `WorkingDaysUtil` helper provides `isWorkingDay(LocalDate, WorkingDays)` and `getOffSetTillNextWorkingDay()` utilities consumed by the loan scheduler whenever a repayment or disbursement date falls on a non-working day.
+`WorkingDays` (`fineract-core/src/main/java/org/apache/fineract/organisation/workingdays/domain/WorkingDays.java`) stores a recurrence rule string (e.g., `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR`) that defines which days of the week are working days. The `WorkingDaysUtil` helper provides `isWorkingDay(WorkingDays, LocalDate)` and `getOffSetDateIfNonWorkingDay(LocalDate, LocalDate, WorkingDays)` utilities consumed by the loan scheduler whenever a repayment or disbursement date falls on a non-working day.
 
 `WorkingDaysApiResource` (`fineract-provider/src/main/java/org/apache/fineract/organisation/workingdays/api/WorkingDaysApiResource.java`) at `@Path("/v1/workingdays")` exposes `GET` and `PUT` endpoints. There is exactly one `WorkingDays` row per tenant.
 

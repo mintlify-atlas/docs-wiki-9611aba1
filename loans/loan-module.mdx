@@ -132,6 +132,7 @@ Located in `fineract-loan/.../service/LoanApplicationWritePlatformService.java`.
 ```java
 CommandProcessingResult submitApplication(JsonCommand command);
 CommandProcessingResult modifyApplication(Long loanId, JsonCommand command);
+CommandProcessingResult deleteApplication(Long loanId);
 CommandProcessingResult approveApplication(Long loanId, JsonCommand command);
 CommandProcessingResult undoApplicationApproval(Long loanId, JsonCommand command);
 CommandProcessingResult rejectApplication(Long loanId, JsonCommand command);
@@ -164,14 +165,16 @@ Located in `fineract-loan/.../service/LoanReadPlatformService.java`. Provides qu
 ```mermaid
 graph TD
     A[fineract-core] --> B[fineract-loan]
+    E[fineract-cob] --> B
     B --> C[fineract-progressive-loan]
     B --> D[fineract-loan-origination]
-    B --> E[fineract-cob]
-    B --> F[fineract-provider]
-    C --> F
+    B --> G[fineract-working-capital-loan]
+    A --> E
+    C --> F[fineract-provider]
     D --> F
     E --> F
-    F --> G[fineract-working-capital-loan]
+    B --> F
+    G --> F
 ```
 
 `fineract-progressive-loan` extends `fineract-loan` with `ProgressiveLoanScheduleGenerator`, `AdvancedPaymentScheduleTransactionProcessor`, `EMICalculator`, `ProgressiveLoanInterestScheduleModel`, and the `ProgressiveLoanModel` persistence entity. `fineract-loan-origination` is an optional, feature-flagged module that attaches originator metadata to loans via `DataEnricher` implementations. See the [Progressive Loan](/loans/progressive-loan) and [Loan Origination](/loans/loan-origination) pages for full details.

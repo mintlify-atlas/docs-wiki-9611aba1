@@ -126,7 +126,7 @@ flowchart TD
     Header -- Yes --> SetTenant
     Header -- No --> Param{tenantIdentifier<br/>query param?}
     Param -- Yes --> SetTenant
-    Param -- No --> NoTenant([No tenant context set<br/>request continues — auth will fail])
+    Param -- No --> NoTenant["No tenant context set — request continues (auth will fail)"]
     SetTenant --> ValidateJWT[Spring validates JWT<br/>signature + claims]
     ValidateJWT --> Convert[FineractOidcJwtAuthenticationConverter<br/>resolves AppUser]
     Convert --> SC([SecurityContext populated])

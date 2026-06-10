@@ -117,15 +117,15 @@ The `executionMap` is a `TreeMap<Long, String>` where keys are step order positi
 
 ## `LoanCOBBusinessStep` — the per-step SPI
 
-Any class that implements `LoanCOBBusinessStep` (`fineract-loan/.../cob/loan/LoanCOBBusinessStep.java`) — itself extending `COBBusinessStep<Loan>` — and is annotated `@Component` is automatically eligible to be registered in the COB pipeline:
+Any class that implements `LoanCOBBusinessStep` (`fineract-loan/src/main/java/org/apache/fineract/cob/loan/LoanCOBBusinessStep.java`) — itself extending `COBBusinessStep<Loan>` — and is annotated `@Component` is automatically eligible to be registered in the COB pipeline:
 
 ```java
-// fineract-loan/.../cob/loan/LoanCOBBusinessStep.java
+// fineract-loan/src/main/java/org/apache/fineract/cob/loan/LoanCOBBusinessStep.java
 public interface LoanCOBBusinessStep extends COBBusinessStep<Loan> {
-    // inherits:
-    Loan execute(Loan input);
-    String getEnumStyledName();   // used as the step identifier in m_batch_business_steps
-    String getHumanReadableName();
+    // inherits from COBBusinessStep<Loan>:
+    //   Loan execute(Loan input);
+    //   String getEnumStyledName();   // used as the step identifier in m_batch_business_steps
+    //   String getHumanReadableName();
 }
 ```
 
@@ -231,6 +231,7 @@ GET  /v1/loans/is-catch-up-running
 @Operation(summary = "Executes Loan COB Catch Up",
            description = "Executes the Loan COB job on every day from the oldest Loan "
                        + "to the current COB business date")
+@ApiResponse(responseCode = "200", description = "All loans are up to date")
 @ApiResponse(responseCode = "202", description = "Catch Up has been started")
 @ApiResponse(responseCode = "400", description = "Catch Up is already running")
 public Response executeLoanCOBCatchUp() { ... }

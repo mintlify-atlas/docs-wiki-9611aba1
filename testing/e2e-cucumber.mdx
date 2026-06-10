@@ -158,6 +158,7 @@ The `TestDatabaseConfiguration` in `fineract-e2e-tests-core` uses these properti
 ```java
 // InitializingHook.java
 @Slf4j
+@SuppressWarnings({ "HideUtilityClassConstructor" })
 public class InitializingHook {
 
     @BeforeAll
@@ -165,10 +166,12 @@ public class InitializingHook {
         StandardEnvironment environment = new StandardEnvironment();
         environment.getPropertySources().addFirst(
             new ResourcePropertySource("classpath:fineract-test-application.properties"));
-        InitializerProperties props = PropertiesFactory.get(environment, InitializerProperties.class);
-        if (props.isEnabled()) {
+        InitializerProperties initializerProperties = PropertiesFactory.get(environment, InitializerProperties.class);
+        if (initializerProperties.isEnabled()) {
             log.info("Setting up global defaults for Fineract");
             FineractInitializerFactory.get().setupGlobalDefaults();
+        } else {
+            log.info("Skipping global defaults for Fineract");
         }
         FineractInitializerFactory.get().setupDefaultsForSuite();
     }
@@ -194,7 +197,7 @@ Global initialization (controlled by `INITIALIZATION_ENABLED=true`) runs the `*G
 
 ### Global Initializer Steps
 
-Located in `fineract-e2e-tests-runner/src/test/java/org/apache/fineract/test/initializer/global/`:
+Located in `fineract-e2e-tests-core/src/test/java/org/apache/fineract/test/initializer/global/` (and mirrored with runner-specific overrides in `fineract-e2e-tests-runner/src/test/java/org/apache/fineract/test/initializer/global/`):
 
 | Class | What It Creates |
 |---|---|
