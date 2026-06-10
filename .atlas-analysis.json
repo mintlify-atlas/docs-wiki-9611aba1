@@ -1,24 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Fineract",
+  "projectType": "api-service",
+  "projectName": "Apache Fineract",
+  "projectDescription": "Apache Fineract is an open-source core banking platform providing REST APIs for loans, savings, accounting, and financial services for underserved populations.",
   "theme": "maple",
-  "colors": {
-    "primary": "#c35696",
-    "light": "#1d5e8b",
-    "dark": "#faf6fa"
-  },
-  "favicon": "https://media.brand.dev/cbc27f91-fd3b-452d-89c7-5e7ded5150f3.jpg",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/apache/fineract"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/apache/fineract"
-    }
-  },
+  "primaryColor": "#c35696",
+  "lightColor": "#1d5e8b",
+  "darkColor": "#faf6fa",
   "navigation": {
     "tabs": [
       {
@@ -27,7 +14,6 @@
           {
             "group": "Overview",
             "pages": [
-              "index",
               "overview/introduction",
               "overview/architecture",
               "overview/module-map"
@@ -152,5 +138,38 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "fineract-loan: Loan lifecycle management (application, approval, disbursal, repayment, write-off)",
+    "fineract-progressive-loan: EMI-based progressive repayment schedule engine",
+    "fineract-savings: Savings account, fixed deposit, recurring deposit products",
+    "fineract-accounting: Double-entry GL accounting, journal entries, accruals, provisioning",
+    "fineract-cob: Spring Batch-based Close of Business processing pipeline",
+    "fineract-security: Spring Security with Basic Auth, OAuth2, 2FA, OIDC federation",
+    "fineract-core: Multi-tenancy infrastructure, command pattern, event system, batch jobs",
+    "fineract-investor: Loan asset externalization / secondary market transfers",
+    "fineract-avro-schemas: Avro schema definitions for Kafka-based external events",
+    "fineract-command: New command framework (async, JDBC, audit, Disruptor implementations)",
+    "fineract-charge: Fee and penalty charge definitions",
+    "fineract-tax: Tax group and component configuration",
+    "fineract-report: Pentaho and datatable-based reporting",
+    "fineract-branch: Teller / cash management for branch operations",
+    "fineract-loan-origination: Loan origination workflow module",
+    "fineract-working-capital-loan: Working capital loan product type",
+    "Multi-tenant architecture: separate DB per tenant, tenant store DB, per-request routing"
+  ],
+  "publicApiSurface": [
+    "ServerApplication.main() — Spring Boot entry point (fineract-provider/src/main/java/org/apache/fineract/ServerApplication.java)",
+    "FineractWebApplicationConfiguration — top-level Spring config wiring (@ComponentScan, @EnableWebSecurity)",
+    "POST /fineract-provider/api/v1/loans — Loan application/submission",
+    "POST /fineract-provider/api/v1/loans/{loanId}/transactions — Repayment, disbursal, write-off",
+    "POST /fineract-provider/api/v1/savingsaccounts — Savings account creation",
+    "GET  /fineract-provider/api/v1/journalentries — GL journal entry query",
+    "POST /fineract-provider/api/v1/batch — Batch API for atomic multi-request processing",
+    "GET  /fineract-provider/api/v1/datatables — Dynamic datatable (extension) queries",
+    "POST /fineract-provider/api/v1/runreports — Pentaho / SQL report execution",
+    "GET  /fineract-provider/actuator/health — Spring Boot actuator health endpoint",
+    "fineract-client (OpenAPI-generated Java client) — org.apache.fineract.client.services.*",
+    "fineract-client-feign (Feign-based generated client) — org.apache.fineract.client.feign.*"
+  ]
 }

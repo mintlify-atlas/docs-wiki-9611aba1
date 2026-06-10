@@ -1,0 +1,217 @@
+---
+title: "Avro Schemas for External Event Serialization"
+sidebarTitle: "Avro Schemas"
+description: "Covers the fineract-avro-schemas module, the MessageV1 envelope, domain schema files per category, Gradle code generation, and BusinessEventSerializer mapping."
+---
+
+All external events published from Fineract's outbox are serialized using [Apache Avro](https://avro.apache.org/). The `fineract-avro-schemas` Gradle subproject owns every `.avsc` schema definition and is responsible for generating the corresponding Java `SpecificRecord` classes at build time via the `com.github.davidmc24.gradle.plugin.avro` plugin. Downstream consumers can depend directly on this artifact to deserialize events without reimplementing the schema.
+
+## Module Location
+
+Schema source files live under:
+
+```
+fineract-avro-schemas/src/main/avro/
+```
+
+Gradle code generation places the resulting Java classes in:
+
+```
+fineract-avro-schemas/build/generated-main-avro-java/org/apache/fineract/avro/
+```
+
+## Message Envelope Schemas
+
+Three top-level envelope schemas define how a single event or a batch of events are wrapped for the broker.
+
+### MessageV1.avsc
+
+The standard single-event envelope. Every individual event is serialized as a `MessageV1` record before being sent to Kafka or JMS:
+
+```json
+{
+  "name": "MessageV1",
+  "namespace": "org.apache.fineract.avro",
+  "type": "record",
+  "fields": [
+    { "name": "id",           "doc": "ID of the outbox row",          "type": "long" },
+    { "name": "source",       "doc": "Unique identifier of the source service", "type": "string" },
+    { "name": "type",         "doc": "Event type, e.g. LoanApprovedBusinessEvent", "type": "string" },
+    { "name": "category",     "doc": "Domain category, e.g. LOAN",    "type": "string" },
+    { "name": "createdAt",    "doc": "UTC ISO_LOCAL_DATE_TIME",        "type": "string" },
+    { "name": "businessDate", "doc": "ISO_LOCAL_DATE business date",   "type": "string" },
+    { "name": "tenantId",     "doc": "Source tenant identifier",       "type": "string" },
+    { "name": "idempotencyKey","doc": "Consumer de-duplication key",   "type": "string" },
+    { "name": "dataschema",   "doc": "Fully qualified Avro class name","type": "string" },
+    { "name": "data",         "doc": "Payload bytes (nested Avro)",    "type": "bytes" }
+  ]
+}
+```
+
+The `dataschema` field carries the fully qualified class name of the nested payload record (e.g., `org.apache.fineract.avro.loan.v1.LoanAccountDataV1`). Consumers use this to select the correct `SpecificRecord` class for deserializing `data`.
+
+### BulkMessagePayloadV1.avsc and BulkMessageItemV1.avsc
+
+For COB batch processing and other bulk operations, multiple events are packed into a `BulkMessagePayloadV1`, which wraps an array of `BulkMessageItemV1` records:
+
+```json
+// BulkMessagePayloadV1.avsc
+{ "name": "BulkMessagePayloadV1", "namespace": "org.apache.fineract.avro",
+  "fields": [{ "name": "datas", "type": { "type": "array", "items": "org.apache.fineract.avro.BulkMessageItemV1" } }] }
+
+// BulkMessageItemV1.avsc (item fields: id, type, category, dataschema, data)
+```
+
+A bulk message is identified by `type = "BulkBusinessEvent"` and `category = "BULK_BUSINESS_EVENTS"` in the `MessageV1` envelope.
+
+## Domain Schema Files by Category
+
+### Loan (`loan/v1/`)
+
+The loan domain has the richest schema set — 37 `.avsc` files in `fineract-avro-schemas/src/main/avro/loan/v1/`:
+
+| Schema | Purpose |
+|---|---|
+| `LoanAccountDataV1.avsc` | Full loan account snapshot (account number, status, schedule, summary, delinquency) |
+| `LoanTransactionDataV1.avsc` | Individual transaction record (type, amount, date, charges) |
+| `LoanTransactionAdjustmentDataV1.avsc` | Chargeback / reversal adjustment record |
+| `LoanProductDataV1.avsc` | Loan product configuration snapshot |
+| `LoanScheduleDataV1.avsc` | Full repayment schedule |
+| `LoanSchedulePeriodDataV1.avsc` | Single installment in the schedule |
+| `LoanChargeDataV1.avsc` | Charge attached to a loan |
+| `LoanOwnershipTransferDataV1.avsc` | Asset externalization transfer record |
+| `LoanAccountDelinquencyRangeDataV1.avsc` | Delinquency range snapshot |
+| `LoanRepaymentDueDataV1.avsc` | Upcoming repayment notification payload |
+| `LoanAccountStayedLockedDataV1.avsc` | Single locked loan COB event payload |
+| `LoanAccountsStayedLockedDataV1.avsc` | Bulk locked loans payload |
+| `OriginatorDetailsV1.avsc` | Originator metadata for asset ownership |
+
+Supporting value-type schemas: `LoanAmountDataV1`, `LoanSummaryDataV1`, `LoanStatusEnumDataV1`, `LoanTransactionEnumDataV1`, `LoanApplicationTimelineDataV1`, `DelinquencyBucketDataV1`, `DelinquencyRangeDataV1`, `CollectionDataV1`, and more.
+
+### Savings (`savings/v1/`)
+
+| Schema | Purpose |
+|---|---|
+| `SavingsAccountDataV1.avsc` | Full savings account snapshot |
+| `SavingsAccountTransactionDataV1.avsc` | Individual deposit/withdrawal transaction |
+| `SavingsAccountChargeDataV1.avsc` | Charge on a savings account |
+| `SavingsAccountSummaryDataV1.avsc` | Balance and summary figures |
+| `AccountTransferDataV1.avsc` | Account-to-account transfer record |
+| `SavingsAccountStayedLockedDataV1.avsc` | Locked savings account COB payload |
+
+### Client (`client/v1/`)
+
+| Schema | Purpose |
+|---|---|
+| `ClientDataV1.avsc` | Full client record (name, status, office, activation date) |
+| `ClientTimelineDataV1.avsc` | Client lifecycle timeline |
+| `ClientCollateralManagementV1.avsc` | Client collateral record |
+
+### Deposits
+
+| Module | Schema |
+|---|---|
+| `fixeddeposit/v1/` | `FixedDepositAccountDataV1.avsc` |
+| `recurringdeposit/v1/` | `RecurringDepositAccountDataV1.avsc` |
+
+### Groups and Offices
+
+| Module | Schema |
+|---|---|
+| `group/v1/` | `GroupGeneralDataV1.avsc`, `GroupRoleDataV1.avsc` |
+| `office/v1/` | `OfficeDataV1.avsc` |
+
+### General Ledger, Shares, and Working Capital
+
+| Module | Schema |
+|---|---|
+| `gl/v1/` | `GLAccountDataV1.avsc` |
+| `share/v1/` | `ShareAccountDataV1.avsc`, `ShareAccountTransactionDataV1.avsc`, `ShareProductDataV1.avsc` |
+| `workingcapitalloan/v1/` | Working capital loan-specific schemas |
+
+### Generic Shared Types (`generic/v1/`)
+
+Reusable value schemas referenced by multiple domain schemas:
+
+- `CurrencyDataV1.avsc` — currency code, precision, and display name
+- `EnumOptionDataV1.avsc` / `StringEnumOptionDataV1.avsc` — ID/value/description triples for enum fields
+- `CodeValueDataV1.avsc` — system code values
+- `CalendarDataV1.avsc` — calendar/meeting schedule data
+- `CommandProcessingResultV1.avsc` — command result envelope
+
+## Schema Directory Tree
+
+```
+fineract-avro-schemas/src/main/avro/
+├── MessageV1.avsc
+├── BulkMessagePayloadV1.avsc
+├── BulkMessageItemV1.avsc
+├── client/v1/
+│   ├── ClientDataV1.avsc
+│   ├── ClientTimelineDataV1.avsc
+│   └── ClientCollateralManagementV1.avsc
+├── fixeddeposit/v1/
+│   └── FixedDepositAccountDataV1.avsc
+├── generic/v1/
+│   ├── CurrencyDataV1.avsc
+│   ├── EnumOptionDataV1.avsc
+│   └── ... (6 files)
+├── gl/v1/
+│   └── GLAccountDataV1.avsc
+├── group/v1/
+│   ├── GroupGeneralDataV1.avsc
+│   └── GroupRoleDataV1.avsc
+├── loan/v1/
+│   ├── LoanAccountDataV1.avsc
+│   ├── LoanTransactionDataV1.avsc
+│   └── ... (37 files total)
+├── office/v1/
+│   └── OfficeDataV1.avsc
+├── payment/v1/
+├── portfolio/v1/
+├── recurringdeposit/v1/
+│   └── RecurringDepositAccountDataV1.avsc
+├── savings/v1/
+│   ├── SavingsAccountDataV1.avsc
+│   └── ... (12 files)
+├── share/v1/
+│   └── ... (7 files)
+└── workingcapitalloan/v1/
+```
+
+## BusinessEventSerializer: Mapping Events to Avro
+
+The `BusinessEventSerializer` interface in `fineract-core/.../event/external/service/serialization/serializer/BusinessEventSerializer.java` defines the contract:
+
+```java
+public interface BusinessEventSerializer {
+    <T> boolean canSerialize(BusinessEvent<T> event); // type check
+    Class<? extends GenericContainer> getSupportedSchema(); // Avro record class
+    <T> ByteBufferSerializable toAvroDTO(BusinessEvent<T> rawEvent); // convert to Avro DTO
+}
+```
+
+`BusinessEventSerializerFactory` holds all serializer beans and selects the correct one by calling `canSerialize(event)` in sequence. Each domain module contributes its own `BusinessEventSerializer` implementations — for example, the loan module has serializers for `LoanApprovedBusinessEvent` → `LoanAccountDataV1`, `LoanTransactionMakeRepaymentPostBusinessEvent` → `LoanTransactionDataV1`, and so on.
+
+The `toAvroDTO` method populates the Avro SpecificRecord from the event's aggregate root. For example, a loan approval serializer calls the loan's read service to produce a `LoanAccountDataV1` populated with the current account state at the moment of the event.
+
+## Consuming Events
+
+Consumers receive a `MessageV1` Avro record. The deserialization pattern is:
+
+```java
+// 1. Deserialize the outer MessageV1 envelope
+MessageV1 envelope = MessageV1.fromByteBuffer(ByteBuffer.wrap(messageBytes));
+
+// 2. Use dataschema to identify the payload type
+String schemaClass = envelope.getDataschema(); // e.g. "org.apache.fineract.avro.loan.v1.LoanAccountDataV1"
+
+// 3. Deserialize the nested payload
+LoanAccountDataV1 payload = LoanAccountDataV1.fromByteBuffer(
+    ByteBuffer.wrap(envelope.getData().array()));
+```
+
+## Related Pages
+
+- [External Events](/messaging/external-events) — outbox pattern and how events are serialized and stored
+- [Kafka and JMS Integration](/messaging/kafka-jms) — how serialized bytes are sent to the broker

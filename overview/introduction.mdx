@@ -1,0 +1,156 @@
+---
+title: "Apache Fineract: Open-Source Core Banking Platform"
+sidebarTitle: "Introduction"
+description: "A complete guide to Apache Fineract, its Spring Boot architecture, Java 21 requirements, Gradle module structure, and how to build and run the platform locally."
+---
+
+Apache Fineract is an open-source core banking system designed to power financial services for microfinance institutions (MFIs), savings-and-credit cooperatives (SACCOs), digital banks, and fintech operators serving underbanked populations. It originated as the technical core of Mifos X and was donated to the Apache Software Foundation, where it has evolved into a production-grade multi-tenant platform used by dozens of deployments worldwide. The codebase is written entirely in Java 21, packaged as a Spring Boot application, and exposes a JAX-RS/Jersey REST API backed by PostgreSQL. Every major write operation flows through an auditable command-processing pipeline, every tenant gets its own isolated database schema, and overnight batch processing is powered by Spring Batch with optional distributed partitioning via JMS or Kafka.
+
+## Who Uses Fineract
+
+<CardGroup cols={3}>
+  <Card title="Microfinance Institutions" icon="building-columns">
+    Group lending, individual loans, savings products, and branch management for MFIs of any size.
+  </Card>
+  <Card title="Cooperatives & SACCOs" icon="users">
+    Recurring deposits, share capital, standing instructions, and member ledger management.
+  </Card>
+  <Card title="Digital Banks & Fintechs" icon="mobile">
+    API-first access, external event streaming, and modular product configuration for BaaS platforms.
+  </Card>
+</CardGroup>
+
+## Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Runtime | Java 21 (LTS) |
+| Framework | Spring Boot (embedded Tomcat) |
+| REST API | JAX-RS via Jersey |
+| ORM / Persistence | Spring Data JPA (Hibernate), named JDBC queries |
+| Database | PostgreSQL (primary), MySQL supported |
+| Batch Processing | Spring Batch with Spring Integration partitioning |
+| Build | Gradle multi-project (Gradle 8.x) |
+| Messaging | ActiveMQ (JMS) or Apache Kafka (optional) |
+| Schema Migrations | Liquibase per tenant |
+| Security | Spring Security — Basic Auth, OAuth2 OIDC, optional 2FA |
+| Serialization | Google Gson + Apache Avro (external events) |
+
+<Note>
+Java 21 is required — the codebase uses records, sealed classes, and virtual-thread-compatible patterns. PostgreSQL is the primary supported database for new deployments; MySQL compatibility is maintained but not the default.
+</Note>
+
+## Building and Running Locally
+
+The simplest path from source to running service is:
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/apache/fineract.git
+    cd fineract
+    ```
+  </Step>
+  <Step title="Start a PostgreSQL instance">
+    ```bash
+    docker run -d --name fineract-db \
+      -e POSTGRES_USER=root \
+      -e POSTGRES_PASSWORD=postgres \
+      -p 5432:5432 postgres:16
+    ```
+  </Step>
+  <Step title="Build the project">
+    ```bash
+    ./gradlew :fineract-provider:bootJar
+    ```
+    This assembles `fineract-provider/build/libs/fineract-provider-*.jar` containing an embedded Tomcat. The `bootJar` task includes all module dependencies via the Gradle project dependency graph.
+  </Step>
+  <Step title="Run the application">
+    ```bash
+    java -jar fineract-provider/build/libs/fineract-provider-*.jar \
+      --fineract.tenant.host=localhost \
+      --fineract.tenant.username=root \
+      --fineract.tenant.password=postgres
+    ```
+    The server starts on port `8080`. The Swagger UI is available at `/fineract-provider/api-docs`.
+  </Step>
+  <Step title="Verify the default tenant">
+    ```bash
+    curl -u mifos:password \
+      -H "Fineract-Platform-TenantId: default" \
+      http://localhost:8080/fineract-provider/api/v1/offices
+    ```
+  </Step>
+</Steps>
+
+The entry point class is `org.apache.fineract.ServerApplication` in `fineract-provider/src/main/java/org/apache/fineract/ServerApplication.java`. It extends `SpringBootServletInitializer` and imports two configuration classes:
+
+```java
+// fineract-provider/src/main/java/org/apache/fineract/ServerApplication.java
+public class ServerApplication extends SpringBootServletInitializer {
+
+    @Import({ FineractWebApplicationConfiguration.class,
+              FineractLiquibaseOnlyApplicationConfiguration.class })
+    private static final class Configuration {}
+
+    public static void main(String[] args) throws IOException {
+        configureApplication(new SpringApplicationBuilder(ServerApplication.class)).run(args);
+    }
+}
+```
+
+`FineractWebApplicationConfiguration` (in `fineract-provider/src/main/java/org/apache/fineract/infrastructure/core/boot/`) drives the full Spring context scan over `org.apache.fineract.**`, enables `@EnableWebSecurity`, `@EnableTransactionManagement`, and `@IntegrationComponentScan`, while explicitly **excluding** Spring Boot's auto-configuration for `DataSource`, `HibernateJpa`, and `Liquibase` — all of which Fineract wires manually to support per-tenant databases.
+
+## Gradle Module Inventory
+
+All Gradle subprojects are declared in `settings.gradle`. The full `include` list at the root of the repository is:
+
+```groovy
+// settings.gradle (excerpt)
+include ':fineract-core'
+include ':fineract-security'
+include ':fineract-cob'
+include ':fineract-validation'
+include ':fineract-command'
+include ':fineract-command-test'
+include ':fineract-command-jdbc'
+include ':fineract-command-audit'
+include ':fineract-command-async'
+include ':fineract-command-disruptor'
+include ':fineract-accounting'
+include ':fineract-provider'
+include ':fineract-branch'
+include ':fineract-document'
+include ':fineract-investor'
+include ':fineract-rates'
+include ':fineract-charge'
+include ':fineract-tax'
+include ':fineract-loan-origination'
+include ':fineract-loan'
+include ':fineract-savings'
+include ':fineract-report'
+include ':fineract-mix'
+include ':fineract-war'
+include ':integration-tests'
+include ':fineract-client'
+include ':fineract-avro-schemas'
+include ':fineract-e2e-tests-core'
+include ':fineract-e2e-tests-runner'
+include 'fineract-progressive-loan'
+include 'fineract-progressive-loan-embeddable-schedule-generator'
+include 'fineract-working-capital-loan'
+include ':custom:docker'
+// custom/* modules loaded dynamically at build time
+```
+
+The `custom/` directory is scanned dynamically using a three-level `companyDir → categoryDir → moduleDir` pattern, making it the official extension point for deployers who want to add domain logic without forking the core.
+
+For a detailed breakdown of each module's role and dependency graph, see [Module Map](/overview/module-map).
+
+## Key Architectural Concepts
+
+Every write request in Fineract passes through a **command pattern** with full auditing and optional maker-checker approval — no direct service calls from controllers for mutating operations. Every inbound HTTP request must carry the `Fineract-Platform-TenantId` header, which resolves the active tenant and routes all subsequent queries to that tenant's dedicated database schema. Background processing is handled by named Spring Batch jobs, some of which (`LOAN_COB`) are partitioned across worker nodes.
+
+<Tip>
+The [Architecture page](/overview/architecture) walks through the complete HTTP → DB request lifecycle with a sequence diagram. The [Multi-Tenancy page](/core/multi-tenancy) explains how tenant routing and connection pooling work in detail.
+</Tip>

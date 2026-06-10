@@ -1,0 +1,164 @@
+---
+title: "JPA Entities, Repositories, and the JDBC Read Path"
+sidebarTitle: "JPA & JDBC"
+description: "Covers AbstractAuditableCustom base entities, Spring Data JPA repositories for writes, JDBC RowMappers for performance reads, tenant-aware JdbcTemplate, and transactional patterns."
+---
+
+Fineract uses a deliberate **dual-path persistence model**: JPA (via Hibernate) for all write operations that benefit from change tracking and relationship management, and raw JDBC (`JdbcTemplate`) for read operations where query complexity or batch-fetch performance makes ORM mapping impractical. Understanding which path is used where — and why — is essential for contributing new features or debugging performance issues.
+
+## Base Entity Hierarchy
+
+All JPA entities in Fineract descend from one of two abstract base classes defined in `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/domain/`.
+
+### AbstractPersistableCustom
+
+`AbstractPersistableCustom<T>` is the root base class. It provides:
+
+- An `@Id` field of generic type `T` (typically `Long`) with `GenerationType.IDENTITY` — meaning PostgreSQL's auto-increment sequence drives key assignment.
+- A transient `isNew` flag managed by `@PrePersist` and `@PostLoad` lifecycle callbacks. This is used by Spring Data to distinguish `save()` (insert) from `merge()` (update) without issuing an extra `SELECT`.
+
+```java
+// fineract-core/.../domain/AbstractPersistableCustom.java
+@MappedSuperclass
+public abstract class AbstractPersistableCustom<T extends Serializable>
+        implements Persistable<T>, Serializable {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private T id;
+
+    @Transient
+    private boolean isNew = true;
+
+    @PrePersist
+    @PostLoad
+    void markNotNew() {
+        this.isNew = false;
+    }
+}
+```
+
+### AbstractAuditableCustom
+
+`AbstractAuditableCustom` extends `AbstractPersistableCustom<Long>` and adds four auditing columns mapped to standard column names that appear on almost every `m_*` business table:
+
+| Java Field | DB Column | Type |
+|---|---|---|
+| `createdBy` | `createdby_id` | `BIGINT` (FK to `m_appuser`) |
+| `createdDate` | `created_date` | `DATETIME` |
+| `lastModifiedBy` | `lastmodifiedby_id` | `BIGINT` (FK to `m_appuser`) |
+| `lastModifiedDate` | `lastmodified_date` | `DATETIME` |
+
+Spring Data's `AuditingEntityListener` populates these fields automatically when the `@EnableJpaAuditing` configuration is active. A variant, `AbstractAuditableWithUTCDateTimeCustom`, forces all timestamps to UTC — this is used in newer modules such as `fineract-investor`.
+
+## Defining a JPA Entity
+
+A typical Fineract entity looks like this pattern (using `ExternalAssetOwner` from the investor module as a concrete example):
+
+```java
+// fineract-investor/.../investor/domain/ExternalAssetOwner.java
+@Getter
+@Setter
+@Entity
+@NoArgsConstructor
+@Table(name = "m_external_asset_owner")
+public class ExternalAssetOwner extends AbstractAuditableWithUTCDateTimeCustom<Long> {
+
+    @Column(name = "external_id", nullable = false, length = 100, unique = true)
+    private ExternalId externalId;
+}
+```
+
+Key conventions:
+- `@Table(name = "m_...")` — all tenant tables are prefixed `m_`.
+- Column names are explicit `snake_case` strings; Hibernate's implicit naming strategy is never relied upon.
+- `@Column(nullable = false)` mirrors `NOT NULL` constraints enforced by the Liquibase changeset.
+- Custom converters (e.g., `ExternalIdConverter` in the investor module) handle value types that map to `VARCHAR` columns.
+
+## Spring Data JPA Repositories
+
+Write operations and simple primary-key lookups go through Spring Data JPA `JpaRepository` sub-interfaces. These live alongside their entities in `domain/` sub-packages:
+
+```java
+// ExternalAssetOwnerRepository.java
+public interface ExternalAssetOwnerRepository
+        extends JpaRepository<ExternalAssetOwner, Long> {
+    Optional<ExternalAssetOwner> findByExternalId(ExternalId externalId);
+}
+```
+
+For the external event outbox, `ExternalEventRepository` extends both `JpaRepository` and `JpaSpecificationExecutor` to support dynamic filtering, and defines custom `@Query` mutations for bulk status updates:
+
+```java
+// fineract-core/.../event/external/repository/ExternalEventRepository.java
+public interface ExternalEventRepository
+        extends JpaRepository<ExternalEvent, Long>,
+                JpaSpecificationExecutor<ExternalEvent> {
+
+    List<ExternalEventView> findByStatusOrderByBusinessDateAscIdAsc(
+            ExternalEventStatus status, Pageable batchSize);
+
+    @Modifying
+    @Query("UPDATE ExternalEvent e SET e.status = " +
+           "org.apache.fineract.infrastructure.event.external.repository.domain" +
+           ".ExternalEventStatus.SENT, e.sentAt = :sentAt WHERE e.id IN :ids")
+    void markEventsSent(@Param("ids") List<Long> ids,
+                        @Param("sentAt") OffsetDateTime sentAt);
+}
+```
+
+## The JDBC Read Path
+
+For complex read queries — portfolio reports, paginated account lists, aggregations — Fineract bypasses JPA and queries via `JdbcTemplate` with hand-written SQL and `RowMapper` implementations. This pattern is sometimes called the *read model* or CQRS-lite approach. The typical structure is:
+
+```
+SomePlatformReadService        (interface)
+SomePlatformReadServiceImpl    (implements via JdbcTemplate + RowMapper)
+```
+
+`JdbcSupport` (in `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/domain/JdbcSupport.java`) provides null-safe helper methods for extracting typed values from `ResultSet` objects.
+
+### Tenant-Aware JdbcTemplate
+
+Because each tenant uses a different datasource, you cannot autowire a plain `JdbcTemplate`. Instead, services inject a `JdbcTemplate` obtained from the platform's routing datasource, which resolves the correct connection pool at call time based on the thread-local tenant context. The `RoutingDataSourceServiceFactory` and `ThreadLocalContextUtil` classes in `fineract-core` manage this.
+
+### PaginationHelper
+
+Report queries that return large result sets use `PaginationHelper<T>` (in `fineract-core`) to apply database-level `LIMIT`/`OFFSET` pagination and return a `Page<T>` without loading all rows into memory. Typical usage:
+
+```java
+return paginationHelper.fetchPage(
+    jdbcTemplate,
+    "SELECT COUNT(*) FROM m_loan WHERE ...",
+    "SELECT ... FROM m_loan WHERE ... ORDER BY id LIMIT ? OFFSET ?",
+    new Object[]{ pageSize, offset },
+    new LoanRowMapper()
+);
+```
+
+## CriteriaQueryFactory
+
+`CriteriaQueryFactory` (in `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/jpa/CriteriaQueryFactory.java`) wraps JPA `CriteriaBuilder` to build type-safe specification queries. It is used in places where the filter predicate is constructed dynamically at runtime — for example, in `ExternalEventRepository`'s `JpaSpecificationExecutor` queries for the event management API.
+
+## Transaction Management
+
+Fineract uses Spring's `@Transactional` throughout. The key conventions are:
+
+- **Service layer** — `@Transactional` on write platform service methods; read services are typically `@Transactional(readOnly = true)`.
+- **Custom transaction managers** — `ExtendedJpaTransactionManager` and `ExtendedDataSourceTransactionManager` (in `fineract-core/.../persistence/`) extend Spring's standard managers to integrate with Fineract's `TransactionLifecycleCallback` mechanism. This allows post-commit hooks such as triggering the external event publisher after a business transaction has committed.
+- **Flush mode** — `FlushModeHandler` allows services to switch the Hibernate session's flush mode within a transaction, which is used by the COB batch job to defer auto-flush until explicit checkpoints.
+
+```mermaid
+flowchart TD
+    API[API Resource] --> CS[Command Source Service]
+    CS --> |@Transactional| WS[Write Platform Service]
+    WS --> |JPA save/update| DB[(PostgreSQL)]
+    WS --> |post-commit callback| EP[External Event Publisher]
+    EP --> MQ[(Kafka / JMS)]
+```
+
+## Related Pages
+
+- [Database Schema](/data/database-schema) — tables that these entities map to
+- [Liquibase Migrations](/data/liquibase-migrations) — how the schema is created and evolved
+- [External Events](/messaging/external-events) — `ExternalEventRepository` write path

@@ -1,0 +1,310 @@
+---
+title: "Charges, Fees, and Tax Configuration"
+sidebarTitle: "Charges & Taxes"
+description: "Charge entity, ChargeAppliesTo and ChargeTimeType enums, ChargeCalculationType, TaxGroup and TaxComponent, and how charges are applied to loan installments and savings accounts."
+---
+
+Fineract's charge system provides a flexible, product-level configuration layer for fees and penalties. A `Charge` definition is a product-agnostic template that specifies when a fee applies (`ChargeTimeType`), how it is calculated (`ChargeCalculationType`), and which product types it can be attached to (`ChargeAppliesTo`). When a loan, savings account, or client is created, the applicable `Charge` definitions are copied into account-level charge records (`LoanCharge`, `SavingsAccountCharge`, `ClientCharge`). Taxes are handled orthogonally: a `TaxGroup` aggregates one or more `TaxComponent` definitions, each of which maps to GL accounts for the tax debit and credit, and is associated to a `Charge` definition.
+
+## Module Layout
+
+```
+fineract-charge/src/main/java/org/apache/fineract/portfolio/charge/
+├── domain/
+│   ├── Charge.java                  # Master charge template (m_charge)
+│   ├── ChargeAppliesTo.java         # Enum: LOAN, SAVINGS, CLIENT, SHARES
+│   ├── ChargeTimeType.java          # Enum: when the charge fires
+│   ├── ChargeCalculationType.java   # Enum: flat, % of amount, etc.
+│   └── ChargePaymentMode.java
+├── api/
+│   └── ChargesApiResource.java      # /v1/charges
+└── service/
+    ├── ChargeReadPlatformService.java
+    └── ChargeWritePlatformService.java
+
+fineract-tax/src/main/java/org/apache/fineract/portfolio/tax/
+├── domain/
+│   ├── TaxComponent.java            # Individual tax rate (m_tax_component)
+│   ├── TaxComponentHistory.java     # Rate change history
+│   ├── TaxGroup.java                # Named group of components (m_tax_group)
+│   └── TaxGroupMappings.java        # Effective-date-bounded component membership
+└── service/
+    ├── ChargeTaxApplicationService.java
+    └── TaxWritePlatformService.java
+```
+
+## Charge Entity
+
+```java
+// fineract-charge/.../charge/domain/Charge.java
+@Entity
+@Table(name = "m_charge",
+    uniqueConstraints = @UniqueConstraint(columnNames = {"name"}, name = "name"))
+public class Charge extends AbstractPersistableCustom<Long> {
+
+    @Column(name = "name", length = 100)
+    private String name;
+
+    @Column(name = "amount", scale = 6, precision = 19, nullable = false)
+    private BigDecimal amount;         // Default amount for flat charges
+
+    @Column(name = "currency_code", length = 3)
+    private String currencyCode;
+
+    @Column(name = "charge_applies_to_enum", nullable = false)
+    private Integer chargeAppliesTo;   // ChargeAppliesTo enum value
+
+    @Column(name = "charge_time_enum", nullable = false)
+    private Integer chargeTimeType;    // ChargeTimeType enum value
+
+    @Column(name = "charge_calculation_enum")
+    private Integer chargeCalculation; // ChargeCalculationType enum value
+
+    @Column(name = "is_penalty", nullable = false)
+    private boolean penalty;
+
+    @Column(name = "is_active", nullable = false)
+    private boolean active;
+
+    @Column(name = "fee_interval")
+    private Integer feeInterval;       // For periodic fees: every N (feeFrequency) periods
+
+    @Column(name = "min_cap", scale = 6, precision = 19)
+    private BigDecimal minCap;         // Minimum charge amount (percentage charges)
+
+    @Column(name = "max_cap", scale = 6, precision = 19)
+    private BigDecimal maxCap;         // Maximum charge amount (percentage charges)
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "income_or_liability_account_id")
+    private GLAccount account;         // GL account for charge income
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    private TaxGroup taxGroup;         // Optional: tax to apply on top of this charge
+}
+```
+
+## ChargeAppliesTo
+
+```java
+// fineract-charge/.../charge/domain/ChargeAppliesTo.java
+public enum ChargeAppliesTo {
+    INVALID(0, "chargeAppliesTo.invalid"),
+    LOAN(1, "chargeAppliesTo.loan"),
+    SAVINGS(2, "chargeAppliesTo.savings"),
+    CLIENT(3, "chargeAppliesTo.client"),
+    SHARES(4, "chargeAppliesTo.shares"),
+    WORKING_CAPITAL_LOAN(5, "chargeAppliesTo.workingCapitalLoan");
+}
+```
+
+Charges are restricted to the product types listed in `ChargeAppliesTo.validValues()`. Attempting to add a SAVINGS charge to a loan throws `ChargeCannotBeAppliedToException`.
+
+## ChargeTimeType
+
+`ChargeTimeType` (in `fineract-core`) defines when a charge fires:
+
+```java
+// fineract-core/.../charge/domain/ChargeTimeType.java
+public enum ChargeTimeType {
+    INVALID(0),
+    DISBURSEMENT(1),             // Only for loan charges — at disbursement
+    SPECIFIED_DUE_DATE(2),       // Loan and savings — explicit date
+    SAVINGS_ACTIVATION(3),       // Savings — when account is activated
+    SAVINGS_CLOSURE(4),          // Savings — when account is closed
+    WITHDRAWAL_FEE(5),           // Savings — on each withdrawal
+    ANNUAL_FEE(6),               // Savings — once per year
+    MONTHLY_FEE(7),              // Savings — once per month
+    INSTALMENT_FEE(8),           // Loan — on each instalment
+    OVERDUE_INSTALLMENT(9),      // Loan — when installment becomes overdue
+    OVERDRAFT_FEE(10),           // Savings — when account goes into overdraft
+    WEEKLY_FEE(11),              // Savings — once per week
+    TRANCHE_DISBURSEMENT(12),    // Loan — on each tranche disbursement
+    SHAREACCOUNT_ACTIVATION(13), // Shares — when share account is activated
+    SHARE_PURCHASE(14),          // Shares — on each share purchase
+    SHARE_REDEEM(15),            // Shares — on each share redemption
+    SAVINGS_NOACTIVITY_FEE(16);  // Savings — triggered by dormancy
+}
+```
+
+<AccordionGroup>
+  <Accordion title="Loan charge time types">
+    Valid for `ChargeAppliesTo.LOAN`: `DISBURSEMENT`, `SPECIFIED_DUE_DATE`, `INSTALMENT_FEE`, `OVERDUE_INSTALLMENT`, `TRANCHE_DISBURSEMENT`
+  </Accordion>
+  <Accordion title="Savings charge time types">
+    Valid for `ChargeAppliesTo.SAVINGS`: `SPECIFIED_DUE_DATE`, `SAVINGS_ACTIVATION`, `SAVINGS_CLOSURE`, `WITHDRAWAL_FEE`, `ANNUAL_FEE`, `MONTHLY_FEE`, `WEEKLY_FEE`, `OVERDRAFT_FEE`, `SAVINGS_NOACTIVITY_FEE`
+  </Accordion>
+  <Accordion title="Share charge time types">
+    Valid for `ChargeAppliesTo.SHARES`: `SHAREACCOUNT_ACTIVATION`, `SHARE_PURCHASE`, `SHARE_REDEEM`
+  </Accordion>
+</AccordionGroup>
+
+## ChargeCalculationType
+
+```java
+// fineract-charge/.../charge/domain/ChargeCalculationType.java
+public enum ChargeCalculationType {
+    INVALID(0),
+    FLAT(1),                          // Fixed monetary amount
+    PERCENT_OF_AMOUNT(2),             // % of outstanding principal or balance
+    PERCENT_OF_AMOUNT_AND_INTEREST(3),// % of (principal + interest) — loans only
+    PERCENT_OF_INTEREST(4),           // % of interest component — loans only
+    PERCENT_OF_DISBURSEMENT_AMOUNT(5);// % of disbursement amount — tranche loans
+}
+```
+
+Savings charges are restricted to `FLAT` or `PERCENT_OF_AMOUNT` (enforced by `validValuesForSavings()`). Client charges only allow `FLAT`. Percentage charges support `minCap` / `maxCap` floor/ceiling enforcement.
+
+## SavingsAccountCharge
+
+When a savings account is created, each `Charge` from the product's charge list is materialised into a `SavingsAccountCharge` row in `m_savings_account_charge`:
+
+```java
+// fineract-savings/.../savings/domain/SavingsAccountCharge.java
+
+@Column(name = "charge_time_enum", nullable = false)
+private Integer chargeTimeType;         // Copied from Charge.chargeTimeType
+
+@Column(name = "charge_due_date")
+private LocalDate dueDate;              // Calculated or specified
+
+@Column(name = "charge_calculation_enum")
+private Integer chargeCalculation;
+
+@Column(name = "amount", scale = 6, precision = 19, nullable = false)
+private BigDecimal amount;              // Current outstanding charge amount
+
+@Column(name = "amount_paid_derived")
+private BigDecimal amountPaid;
+
+@Column(name = "amount_waived_derived")
+private BigDecimal amountWaived;
+
+@Column(name = "amount_outstanding_derived", nullable = false)
+private BigDecimal amountOutstanding;
+
+@Column(name = "is_penalty", nullable = false)
+private boolean penalty;
+
+@Column(name = "is_paid_derived", nullable = false)
+private boolean paid;
+
+@Column(name = "waived", nullable = false)
+private boolean waived;
+
+@Column(name = "is_active", nullable = false)
+private boolean status;
+```
+
+Periodic charges (`ANNUAL_FEE`, `MONTHLY_FEE`, `WEEKLY_FEE`) are auto-applied by the batch jobs `ApplyAnnualFeeForSavingsTasklet` and `PayDueSavingsChargesTasklet`.
+
+### Withdrawal Fee Flow
+
+When `SavingsAccountWritePlatformService.withdrawal()` is called, `SavingsAccount.pay()` iterates through active charges with `chargeTimeType == WITHDRAWAL_FEE` and computes the fee amount based on `chargeCalculation`. The fee is deducted from the withdrawal amount and a `PAY_CHARGE` savings transaction is created alongside the `WITHDRAWAL` transaction. These share the same `transactionId` group for accounting.
+
+## Applying Charges to Loan Installments
+
+Loan charges with `INSTALMENT_FEE` time type are distributed across each repayment schedule installment. The `LoanRepaymentScheduleInstallment` stores per-installment fee amounts. On each repayment, the system first applies the installment fee portion before applying principal and interest.
+
+`OVERDUE_INSTALLMENT` charges fire when a scheduled job (`ApplyPenaltyForOverdueLoansTasklet`) detects that a repayment date has passed. The penalty amount is computed based on the overdue principal and the configured `ChargeCalculationType`, capped by `maxCap` if set.
+
+## TaxComponent
+
+`TaxComponent` (mapped to `m_tax_component`) represents a single withholding or service tax rate:
+
+```java
+// fineract-tax/.../tax/domain/TaxComponent.java
+@Entity
+@Table(name = "m_tax_component")
+public class TaxComponent extends AbstractAuditableCustom {
+
+    @Column(name = "name", length = 100)
+    private String name;
+
+    @Column(name = "percentage", scale = 6, precision = 19, nullable = false)
+    private BigDecimal percentage;       // Tax rate, e.g. 16.00 for 16%
+
+    @Column(name = "debit_account_type_enum")
+    private Integer debitAccountType;    // GLAccountType for debit side
+
+    @ManyToOne
+    @JoinColumn(name = "debit_account_id")
+    private GLAccount debitAccount;      // Usually a tax expense or receivable
+
+    @Column(name = "credit_account_type_enum")
+    private Integer creditAccountType;
+
+    @ManyToOne
+    @JoinColumn(name = "credit_account_id")
+    private GLAccount creditAccount;     // Usually a tax payable (LIABILITY)
+
+    @Column(name = "start_date", nullable = false)
+    private LocalDate startDate;
+
+    @OneToMany(cascade = CascadeType.ALL, ...)
+    private Set<TaxComponentHistory> taxComponentHistories; // Rate change audit trail
+}
+```
+
+When a tax-rate change is needed, the old `TaxComponent` record's current percentage is archived to `TaxComponentHistory` (mapped to `m_tax_component_history`) and the new rate is written to `TaxComponent`. This preserves accurate historical tax application.
+
+## TaxGroup
+
+`TaxGroup` (mapped to `m_tax_group`) collects multiple `TaxComponent` definitions under one name:
+
+```java
+@Entity
+@Table(name = "m_tax_group")
+public class TaxGroup extends AbstractAuditableCustom {
+
+    @Column(name = "name", length = 100)
+    private String name;
+
+    @OneToMany(cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER,
+               mappedBy = "taxGroup")
+    private Set<TaxGroupMappings> taxGroupMappings;
+}
+```
+
+`TaxGroupMappings` (mapped to `m_tax_group_mappings`) links a `TaxComponent` to a `TaxGroup` with effective `startDate` / `endDate` bounds, allowing components to be added and removed from the group over time.
+
+### Tax Application Flow
+
+A `Charge` definition references a `TaxGroup` via its `taxGroup` field. `ChargeTaxApplicationService` computes the tax amount when the charge is collected:
+
+1. Resolves all active `TaxComponent` entries in the `TaxGroup` as of the transaction date.
+2. Computes `taxAmount = chargeAmount × (component.percentage / 100)` for each component.
+3. Creates a `SavingsAccountTransactionTaxDetails` or `LoanChargePaidBy` row to track the tax portion.
+4. Posts GL entries for each component using the component's `debitAccount` and `creditAccount`.
+
+## ChargesApiResource
+
+`ChargesApiResource` in `fineract-charge` is at `/v1/charges`:
+
+```java
+// fineract-charge/.../charge/api/ChargesApiResource.java
+@Path("/v1/charges")
+```
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/charges` | List all charge templates (filter by `chargeAppliesTo`) |
+| `GET` | `/v1/charges/{chargeId}` | Retrieve single charge |
+| `GET` | `/v1/charges/template` | Get dropdown options |
+| `POST` | `/v1/charges` | Create charge definition |
+| `PUT` | `/v1/charges/{chargeId}` | Update charge (name, amount only once in use) |
+| `DELETE` | `/v1/charges/{chargeId}` | Delete (blocked if in use by any account) |
+
+Tax API resources:
+
+| Resource | Path |
+|---|---|
+| `TaxComponentApiResource` | `/v1/taxes/component` |
+| `TaxGroupApiResource` | `/v1/taxes/group` |
+
+## Related Pages
+
+- [Savings Module](/savings/savings-module) — `SavingsAccountCharge` lifecycle and periodic fee jobs
+- [Fixed and Recurring Deposits](/savings/fixed-recurring-deposits) — pre-closure penalty charges
+- [GL Accounts](/accounting/gl-accounts) — `income_or_liability_account_id` on `Charge` and tax component GL accounts
+- [Client Management](/portfolio/client-management) — `CLIENT` charges applied at activation or specified dates

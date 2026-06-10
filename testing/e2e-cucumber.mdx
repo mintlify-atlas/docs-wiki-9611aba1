@@ -1,0 +1,418 @@
+---
+title: "End-to-End Cucumber Tests: BDD Feature Coverage"
+sidebarTitle: "Cucumber E2E"
+description: "fineract-e2e-tests-core and fineract-e2e-tests-runner modules, Gherkin feature file inventory, step definition layout, initializer hooks, and how to run locally."
+---
+
+Fineract's end-to-end (E2E) test suite uses [Cucumber 7.34.3](https://cucumber.io/) with the JUnit Platform engine to execute Gherkin scenarios against a running Fineract server. The suite is split across two Gradle modules: `fineract-e2e-tests-core` contains all step definitions, hooks, initializers, and helper data classes; `fineract-e2e-tests-runner` contains the `TestRunner`, feature files, and the Gradle `cucumber` task that orchestrates execution. This separation allows the core step definitions to be reused in custom extension projects by adding a dependency on `:fineract-e2e-tests-core`.
+
+## Module Structure
+
+```
+fineract-e2e-tests-core/
+└── src/test/java/org/apache/fineract/test/
+    ├── api/
+    │   ├── ApiProperties.java              # Spring @Value binding for test coordinates
+    │   └── FineractClientConfiguration.java
+    ├── config/
+    │   ├── TestApplicationConfiguration.java
+    │   ├── TestDatabaseConfiguration.java
+    │   └── CacheConfiguration.java
+    ├── data/                               # Enums: LoanStatus, CobBusinessStep, etc.
+    ├── stepdef/
+    │   ├── AbstractStepDef.java            # base class injecting feign API clients
+    │   ├── account/AccountTransferStepDef.java
+    │   ├── assetexternalization/AssetExternalizationStepDef.java
+    │   ├── common/
+    │   │   ├── BusinessDateStepDef.java
+    │   │   ├── ClientStepDef.java
+    │   │   ├── GlobalConfigurationStepDef.java
+    │   │   ├── JournalEntriesStepDef.java
+    │   │   ├── SchedulerStepDef.java
+    │   │   └── ...
+    │   ├── hook/
+    │   │   ├── InitializingHook.java       # @BeforeAll / @AfterAll lifecycle
+    │   │   ├── TestContextLifecycleHook.java
+    │   │   └── MessagingHook.java
+    │   ├── loan/
+    │   │   ├── LoanStepDef.java            # largest step def (~5000 lines)
+    │   │   ├── LoanCOBStepDef.java
+    │   │   ├── LoanDelinquencyStepDef.java
+    │   │   ├── LoanChargeStepDef.java
+    │   │   ├── LoanReAgingStepDef.java
+    │   │   ├── LoanReAmortizationStepDef.java
+    │   │   └── ...
+    │   └── saving/SavingsAccountStepDef.java
+    └── initializer/
+        ├── global/
+        │   ├── LoanProductGlobalInitializerStep.java
+        │   ├── ChargeGlobalInitializerStep.java
+        │   ├── CobBusinessStepInitializerStep.java
+        │   ├── DelinquencyGlobalInitializerStep.java
+        │   └── ...
+        ├── suite/
+        └── scenario/
+
+fineract-e2e-tests-runner/
+└── src/test/
+    ├── java/org/apache/fineract/test/
+    │   ├── TestRunner.java
+    │   ├── config/
+    │   └── initializer/global/
+    │       ├── BusinessDateInitializerStep.java
+    │       ├── LoanProductGlobalInitializerStep.java (runner-specific overrides)
+    │       └── ...
+    └── resources/
+        ├── features/                       # 100+ .feature files
+        ├── fineract-test-application.properties
+        ├── cucumber.properties
+        └── junit-platform.properties
+```
+
+## `TestRunner.java`
+
+`TestRunner` is the JUnit 5 suite entry point for the E2E tests in `fineract-e2e-tests-runner`:
+
+```java
+// fineract-e2e-tests-runner/src/test/java/org/apache/fineract/test/TestRunner.java
+@Suite
+@IncludeEngines("cucumber")
+@SelectPackages("org.apache.fineract.test")
+@SelectDirectories("src/test/resources/features")
+@ExcludeTags("Skip")
+@ConfigurationParameter(key = PLUGIN_PROPERTY_NAME, value = "pretty")
+@ConfigurationParameter(
+    key = GLUE_PROPERTY_NAME,
+    value = "org.apache.fineract.test.stepdef, " +
+            "org.apache.fineract.test.stepdef.common, " +
+            "org.apache.fineract.test.stepdef.hook, " +
+            "org.apache.fineract.test.stepdef.loan, " +
+            "org.apache.fineract.test.stepdef.saving, " +
+            "org.apache.fineract.test.config"
+)
+public class TestRunner {}
+```
+
+The `@ExcludeTags("Skip")` annotation causes any scenario tagged `@Skip` to be silently omitted. All feature files under `src/test/resources/features/` are discovered automatically via `@SelectDirectories`.
+
+## Client Library: `fineract-client-feign`
+
+Step definitions call the Fineract API through the generated `fineract-client-feign` module rather than raw HTTP. `ApiProperties` binds the server coordinates from `fineract-test-application.properties`:
+
+```java
+// fineract-e2e-tests-core/.../api/ApiProperties.java
+@Component
+@Getter
+public class ApiProperties {
+    @Value("${fineract-test.api.base-url}")
+    private String baseUrl;           // default: https://localhost:8443
+
+    @Value("${fineract-test.api.username}")
+    private String username;           // default: mifos
+
+    @Value("${fineract-test.api.password}")
+    private String password;           // default: password
+
+    @Value("${fineract-test.api.tenant-id}")
+    private String tenantId;           // default: default
+
+    @Value("${fineract-test.client-read-timeout}")
+    private long readTimeout;          // default: 60 (seconds)
+}
+```
+
+## Configuration Properties
+
+All test configuration is externalized in `fineract-e2e-tests-core/src/test/resources/fineract-test-application.properties` and overridden via environment variables:
+
+```properties
+# fineract-test-application.properties
+fineract-test.api.base-url=${BASE_URL:https://localhost:8443}
+fineract-test.api.username=${TEST_USERNAME:mifos}
+fineract-test.api.password=${TEST_PASSWORD:password}
+fineract-test.api.strong-password=${TEST_STRONG_PASSWORD:A1b2c3d4e5f$}
+fineract-test.api.tenant-id=${TEST_TENANT_ID:default}
+
+fineract-test.initialization.enabled=${INITIALIZATION_ENABLED:false}
+
+# Job polling
+fineract-test.job.interval-in-ms=${POLLING_JOB_INTERVAL_IN_MS:100}
+fineract-test.job.delay-in-ms=${POLLING_JOB_DELAY_IN_MS:3000}
+fineract-test.job.wait-timeout-in-ms=${POLLING_JOB_WAIT_TIMEOUT_IN_MS:120000}
+
+# TestDB (for direct SQL verification)
+fineract-test.db.protocol=${TESTDB_PROTOCOL:jdbc:postgresql}
+fineract-test.db.hostname=${TESTDB_HOSTNAME:localhost}
+fineract-test.db.port=${TESTDB_PORT:5432}
+fineract-test.db.name=${TESTDB_NAME:fineract_default}
+fineract-test.db.username=${TESTDB_USERNAME:postgres}
+fineract-test.db.password=${TESTDB_PASSWORD:skdcnwauicn2ucnaecasdsajdnizucawencascdca}
+```
+
+The `TestDatabaseConfiguration` in `fineract-e2e-tests-core` uses these properties to build a `JdbcTemplate` for steps that need to verify database state directly.
+
+## Lifecycle Hooks
+
+`InitializingHook` (package `org.apache.fineract.test.stepdef.hook`) drives the global test setup and teardown via Cucumber JUnit 5 lifecycle annotations:
+
+```java
+// InitializingHook.java
+@Slf4j
+public class InitializingHook {
+
+    @BeforeAll
+    public static void beforeAll() throws Exception {
+        StandardEnvironment environment = new StandardEnvironment();
+        environment.getPropertySources().addFirst(
+            new ResourcePropertySource("classpath:fineract-test-application.properties"));
+        InitializerProperties props = PropertiesFactory.get(environment, InitializerProperties.class);
+        if (props.isEnabled()) {
+            log.info("Setting up global defaults for Fineract");
+            FineractInitializerFactory.get().setupGlobalDefaults();
+        }
+        FineractInitializerFactory.get().setupDefaultsForSuite();
+    }
+
+    @Before
+    public static void before() throws Exception {
+        FineractInitializerFactory.get().setupDefaultsForScenario();
+    }
+
+    @After
+    public static void after() throws Exception {
+        FineractInitializerFactory.get().resetDefaultsAfterScenario();
+    }
+
+    @AfterAll
+    public static void afterAll() throws Exception {
+        FineractInitializerFactory.get().resetDefaultsAfterSuite();
+    }
+}
+```
+
+Global initialization (controlled by `INITIALIZATION_ENABLED=true`) runs the `*GlobalInitializerStep` classes to pre-create loan products, charge templates, delinquency buckets, GL accounts, currencies, and funds that scenarios rely on. When disabled, the test suite assumes these objects already exist (typical in CI where the database is seeded once).
+
+### Global Initializer Steps
+
+Located in `fineract-e2e-tests-runner/src/test/java/org/apache/fineract/test/initializer/global/`:
+
+| Class | What It Creates |
+|---|---|
+| `LoanProductGlobalInitializerStep` | Pre-defined loan product catalogue (LP1, LP2, LP2_ADV_PYMNT, etc.) |
+| `ChargeGlobalInitializerStep` | Standard charge types (flat fee, percentage, overdue) |
+| `CobBusinessStepInitializerStep` | COB business step configuration order |
+| `DelinquencyGlobalInitializerStep` | Delinquency ranges and buckets |
+| `GLGlobalInitializerStep` | Chart of Accounts (asset, liability, income, expense) |
+| `FinancialActivityMappingGlobalInitializerStep` | Financial activity → GL account mapping |
+| `CurrencyGlobalInitializerStep` | EUR and USD currencies |
+| `FundGlobalInitializerStep` | Fund definitions |
+| `PaymentTypeGlobalInitializerStep` | Payment types (AUTOPAY, etc.) |
+| `SavingsProductGlobalInitializer` | Default savings product |
+| `SchedulerGlobalInitializerStep` | Disable auto-start for all scheduler jobs |
+| `BusinessDateInitializerStep` | Reset business date to actual date |
+
+## Step Definition Organization
+
+Step definitions are organized in two sub-packages within `org.apache.fineract.test.stepdef`:
+
+**`stepdef.common`** — cross-cutting infrastructure steps wired into most scenarios:
+
+| Class | Gherkin phrases (examples) |
+|---|---|
+| `BusinessDateStepDef` | `Admin sets the business date to "01 January 2022"` |
+| `ClientStepDef` | `Admin creates a client with random data` |
+| `GlobalConfigurationStepDef` | `Admin enables the Business Date configuration` |
+| `SchedulerStepDef` | `Admin runs COB job` |
+| `JournalEntriesStepDef` | `Loan has 3 "CREDIT" journal entries for "INTEREST_INCOME"` |
+| `BusinessStepConfigurationStepDef` | `Admin sets the COB step order: Apply penalty, ...` |
+
+**`stepdef.loan`** — loan domain steps:
+
+| Class | Gherkin phrases (examples) |
+|---|---|
+| `LoanStepDef` | `Admin creates a new default Loan`, `Admin successfully disburse the loan on "..." with "..." EUR` |
+| `LoanCOBStepDef` | `Admin checks that last closed business date of loan is "..."` |
+| `LoanDelinquencyStepDef` | `Loan is on the delinquency bucket "1 day – 7 days"` |
+| `LoanChargeStepDef` | `Admin adds "LOAN_SNOOZE_FEE" due date charge to the loan` |
+| `LoanChargeBackStepDef` | `Admin makes "CHARGEBACK" transaction` |
+| `LoanReAgingStepDef` | `Admin successfully re-ages the loan` |
+| `LoanReAmortizationStepDef` | `Admin successfully re-amortizes the loan` |
+| `InlineCOBStepDef` | `Admin triggers inline COB for the loan` |
+| `LoanRepaymentStepDef` | `Customer makes "AUTOPAY" repayment on "..." with ... EUR` |
+
+## Feature Files
+
+All `.feature` files reside in `fineract-e2e-tests-runner/src/test/resources/features/`. The table below lists every file with its feature coverage area:
+
+| Feature File | Coverage Area |
+|---|---|
+| `0_COB.feature` | COB catch-up, delinquency bucket assignment, last-closed-business-date |
+| `AccountTransfer.feature` | Account-to-account transfers |
+| `AssetExternalization-Part1.feature` | Loan asset sale (investor transfer) initiation |
+| `AssetExternalization-Part2.feature` | Asset externalization buyback and cancellation |
+| `BatchApi.feature` | Compound (batch) API request/response |
+| `BusinessDate.feature` | Business date operations and COB interaction |
+| `Client.feature` | Client CRUD and lifecycle |
+| `Configuration.feature` | Global configuration flags |
+| `Currency.feature` | Currency management |
+| `Datatables.feature` | Custom datatable CRUD |
+| `EMICalculation-Part1.feature` | EMI schedule computation (simple cases) |
+| `EMICalculation-Part2.feature` | EMI with interest recalculation |
+| `EMICalculation-Part3.feature` | EMI with fees and penalties |
+| `EMICalculation-Part4.feature` | EMI edge cases (grace periods, balloon) |
+| `InlineCOB.feature` | Inline COB (per-loan COB trigger) |
+| `Loan-Part1.feature` | Loan create / approve / disburse basics |
+| `Loan-Part2.feature` | Loan repayment, overpayment, underpayment |
+| `Loan-Part3.feature` | Loan product parameter variations |
+| `Loan-Part4.feature` | Loan edge cases and negative scenarios |
+| `LoanAccrualActivity-Part1.feature` | Accrual activity calculation |
+| `LoanAccrualActivity-Part2.feature` | Accrual activity with COB |
+| `LoanAccrualTransaction.feature` | Accrual journal entries |
+| `LoanBuyDownFees.feature` | Buy-down fee amortization |
+| `LoanCBR.feature` | Credit bureau reporting |
+| `LoanCapitalizedIncome-Part1.feature` | Capitalized income product |
+| `LoanCapitalizedIncome-Part2.feature` | Capitalized income advanced scenarios |
+| `LoanChargeOff-Part1.feature` | Charge-off initiation |
+| `LoanChargeOff-Part2.feature` | Charge-off repayment behavior |
+| `LoanChargeOff-Part3.feature` | Charge-off accounting entries |
+| `LoanChargeOff-Part4.feature` | Charge-off with advanced payment |
+| `LoanChargeback-Part1.feature` | Chargeback transactions |
+| `LoanChargeback-Part2.feature` | Chargeback with overpayment |
+| `LoanChargeback-Part3.feature` | Chargeback COB interaction |
+| `LoanChargesCumulativeLoan.feature` | Cumulative loan charge scenarios |
+| `LoanChargesDisbursement.feature` | Disbursement-triggered charges |
+| `LoanChargesInstallmentFee.feature` | Installment-level charges |
+| `LoanChargesProgressiveLoan.feature` | Charges on progressive (EMI) loans |
+| `LoanChargesTrancheDisbursement.feature` | Tranche disbursement charges |
+| `LoanContractTermination.feature` | Early termination scenarios |
+| `LoanDelayedScheduleCaptures-Part1.feature` | Delayed schedule capture |
+| `LoanDelayedScheduleCaptures-Part2.feature` | Delayed schedule capture advanced |
+| `LoanDelinquency-Part1.feature` | Delinquency range assignment |
+| `LoanDelinquency-Part2.feature` | Delinquency with actions and pauses |
+| `LoanDownPayment-Part1.feature` | Down payment product |
+| `LoanDownPayment-Part2.feature` | Down payment with multi-disbursal |
+| `LoanInterestPause.feature` | Interest pause periods |
+| `LoanInterestPaymentWaiver.feature` | Interest waiver transactions |
+| `LoanInterestRateChange.feature` | In-flight interest rate change |
+| `LoanMerchantIssuedRefund.feature` | Merchant-issued refund transaction type |
+| `LoanMigration.feature` | Loan data migration scenarios |
+| `LoanOrigination.feature` | Loan origination workflow |
+| `LoanOverrideFileds.feature` | Attribute override flags |
+| `LoanPayoutRefund.feature` | Payout refund transaction type |
+| `LoanProduct.feature` | Loan product CRUD |
+| `LoanReAging-Part1.feature` | Re-aging (payment schedule extension) |
+| `LoanReAging-Part2.feature` | Re-aging with charges |
+| `LoanReAging-Part3.feature` | Re-aging COB interaction |
+| `LoanReAgingAccruals.feature` | Accruals after re-aging |
+| `LoanReAgingEqualAmortization-Part1.feature` | Equal amortization re-aging |
+| `LoanReAmortization-Part1.feature` | Re-amortization scenarios |
+| `LoanReAmortization-Part2.feature` | Re-amortization with partial payments |
+| `LoanRegressionSafety.feature` | Regression safety smoke tests |
+| `LoanRepayment-Part1.feature` | Basic repayment flows |
+| `LoanRepayment-Part2.feature` | Repayment with charges |
+| `LoanRepayment-Part3.feature` | Repayment with delinquency |
+| `LoanRepayment-Part4.feature` | Edge-case repayment |
+| `LoanRepaymentSchedule.feature` | Schedule comparison after transactions |
+| `LoanReschedule.feature` | Reschedule request workflow |
+| `LoanUpdateApprovedAmount.feature` | Modifying approved principal |
+| `LoanWriteOff.feature` | Write-off transaction |
+| `Reporting.feature` | Report generation endpoints |
+| `SavingsAccount.feature` | Savings account lifecycle and interest |
+| `WorkingCapital*.feature` (29 files) | Working capital loan product — accounts, charges, delinquency, COB, breaches, discounts, amortization |
+
+## Running Cucumber E2E Tests
+
+Start a Fineract instance (see [Docker & Kubernetes →](/deployment/docker-kubernetes)), then invoke the `cucumber` task from the runner module:
+
+```bash
+# Run all E2E tests against localhost:8443
+./gradlew :fineract-e2e-tests-runner:cucumber
+
+# Run a single feature file
+./gradlew :fineract-e2e-tests-runner:cucumber \
+  -Pcucumber.features=src/test/resources/features/Loan-Part1.feature
+
+# Run scenarios matching a tag
+./gradlew :fineract-e2e-tests-runner:cucumber \
+  -Pcucumber.tags="@LoanFeature and @Smoke"
+
+# Run against a non-default server
+BASE_URL=https://staging.example.com:8443 \
+TEST_USERNAME=admin \
+TEST_PASSWORD=secret \
+./gradlew :fineract-e2e-tests-runner:cucumber
+```
+
+The `cucumber` task is configured in `fineract-e2e-tests-runner/build.gradle`:
+
+```groovy
+cucumber {
+    featurePath = project.hasProperty("cucumber.features")
+        ? project.getProperty("cucumber.features")
+        : "src/test/resources/features"
+
+    tags = project.hasProperty("cucumber.tags")
+        ? [project.getProperty("cucumber.tags")]
+        : 'not @Skip'
+
+    plugin = ['pretty', 'io.qameta.allure.cucumber7jvm.AllureCucumber7Jvm']
+}
+tasks.named('cucumber').get().finalizedBy 'allureReport'
+tasks.named('cucumber').get().dependsOn 'spotlessCheck'
+```
+
+After a run, the [Allure](https://allurereport.org/) report is generated at `fineract-e2e-tests-runner/build/allure-report/`.
+
+### CI Workflow
+
+`.github/workflows/build-cucumber.yml` runs the full E2E suite in CI. The workflow builds the Docker image, starts the stack via `docker-compose-postgresql.yml`, waits for the actuator health endpoint, then runs:
+
+```bash
+./gradlew :fineract-e2e-tests-runner:cucumber
+```
+
+Allure results are archived as a workflow artifact on failure.
+
+## Scenario Structure
+
+A typical loan scenario in `Loan-Part1.feature` demonstrates the Gherkin style:
+
+```gherkin
+@LoanFeature
+Feature: Loan - Part1
+
+  @TestRailId:C16 @Smoke
+  Scenario: Loan creation functionality in Fineract
+    When Admin sets the business date to the actual date
+    When Admin creates a client with random data
+    When Admin creates a new Loan
+
+  @TestRailId:C17
+  Scenario: Loan creation functionality in Fineract
+    When Admin sets the business date to "1 July 2022"
+    When Admin creates a client with random data
+    And Admin successfully creates a new customised Loan submitted on date: "1 July 2022",
+        with Principal: "5000", a loanTermFrequency: 24 months, and numberOfRepayments: 24
+```
+
+TestRail IDs (`@TestRailId:C16`) are attached as tags, enabling the `TestRailLifecycleHook` (in `stepdef/hook/`) to report results back to TestRail when `TESTRAIL_ENABLED=true`.
+
+## Parallel Execution Configuration
+
+`junit-platform.properties` in the runner's resources controls parallel execution settings:
+
+```properties
+# junit-platform.properties
+cucumber.execution.parallel.enabled=false
+cucumber.execution.parallel.config.strategy=fixed
+cucumber.execution.parallel.config.fixed.parallelism=3
+cucumber.execution.exclusive-resources.isolated.read-write=\
+  org.junit.platform.engine.support.hierarchical.ExclusiveResource.GLOBAL_KEY
+cucumber.execution.execution-mode.feature=same_thread
+```
+
+Parallel execution is disabled by default because many scenarios mutate shared global state (business date, global configuration). Scenarios that are safe to run concurrently are not yet individually tagged for parallelism.
+
+---
+
+**See also:** [Integration Tests →](/testing/integration-tests) · [Build System →](/deployment/build-system) · [Docker & Kubernetes →](/deployment/docker-kubernetes)

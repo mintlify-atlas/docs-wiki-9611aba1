@@ -1,0 +1,180 @@
+---
+title: "fineract-core: Shared Infrastructure and Utilities"
+sidebarTitle: "Core Module"
+description: "Deep-dive into fineract-core's shared domain types, tenant infrastructure, serialization, pagination helpers, JPA base classes, and Spring wiring utilities."
+---
+
+`fineract-core` is the foundational Gradle module that every other Fineract module depends on. It provides no domain logic — no loans, no savings accounts, no accounting entries — but instead supplies the scaffolding that all domain modules build on: thread-safe tenant context propagation, a routing datasource abstraction, the command-processing SPI, the business-event SPI, shared JPA base classes with auditing, pagination over JDBC, and a suite of serialization utilities. Understanding `fineract-core` is a prerequisite for contributing to any other part of the codebase.
+
+The module root is `fineract-core/src/main/java/org/apache/fineract/` and its primary package tree is `org.apache.fineract.infrastructure.core`. The sub-packages and their responsibilities are described below.
+
+## JPA Base Classes
+
+All persistent entities in Fineract inherit from one of two base classes defined in `fineract-core/src/main/java/org/apache/fineract/infrastructure/core/domain/`.
+
+### `AbstractPersistableCustom<ID>`
+
+A Lombok-free JPA `@MappedSuperclass` that provides a single surrogate `id` column (type `Long`) and implements `equals` / `hashCode` based on entity identity. Every entity table in Fineract has a `BIGINT` primary key named `id` backed by a sequence.
+
+### `AbstractAuditableCustom`
+
+Extends `AbstractPersistableCustom<Long>` and implements Spring Data's `Auditable<Long, Long, LocalDateTime>`. Adds four columns to every audited entity:
+
+```java
+// fineract-core/src/main/java/org/apache/fineract/infrastructure/core/domain/AbstractAuditableCustom.java
+@MappedSuperclass
+public abstract class AbstractAuditableCustom extends AbstractPersistableCustom<Long>
+        implements Auditable<Long, Long, LocalDateTime> {
+
+    @Column(name = "createdby_id")
+    private Long createdBy;
+
+    @Column(name = "created_date")
+    private LocalDateTime createdDate;
+
+    @Column(name = "lastmodifiedby_id")
+    private Long lastModifiedBy;
+
+    @Column(name = "lastmodified_date")
+    private LocalDateTime lastModifiedDate;
+    // getters / setters omitted
+}
+```
+
+Most core domain entities (clients, loans, savings accounts, etc.) extend `AbstractAuditableCustom`. Spring Data JPA's `AuditingEntityListener` populates these fields automatically when `@EnableJpaAuditing` is active.
+
+<Note>
+The module docstring on `AbstractAuditableCustom` says "Make sure to modify the same class in the modules (fineract-investor, etc)". Some modules carry their own copies of the class to avoid a dependency on `fineract-core` — always check for local copies before patching the base class.
+</Note>
+
+## Domain Value Objects
+
+`fineract-core/src/main/java/org/apache/fineract/infrastructure/core/domain/` also contains several important value types:
+
+- **`FineractPlatformTenant`** — immutable record of a tenant: `id`, `tenantIdentifier`, `name`, `timezoneId`, and a nested `FineractPlatformTenantConnection`. Stored in `ThreadLocal` for the duration of each request.
+- **`FineractPlatformTenantConnection`** — carries JDBC coordinates (`schemaServer`, `schemaName`, `schemaUsername`, `schemaPassword`), optional read-replica coordinates, and HikariCP pool sizing parameters.
+- **`ExternalId`** — wrapper for external identifier strings on loan accounts, enabling stable external references independent of database surrogate keys.
+- **`BatchRequestContextHolder`** — `ThreadLocal`-backed context flag that signals whether a request is executing inside a Spring Batch enclosing transaction.
+
+## Thread-Local Context (`ThreadLocalContextUtil`)
+
+`ThreadLocalContextUtil` in `org.apache.fineract.infrastructure.core.service` is the single location where per-request state is stored and retrieved. It holds:
+
+```java
+// ThreadLocalContextUtil.java
+private static final ThreadLocal<FineractPlatformTenant> tenantContext = new ThreadLocal<>();
+private static final ThreadLocal<String> authTokenContext = new ThreadLocal<>();
+private static final ThreadLocal<HashMap<BusinessDateType, LocalDate>> businessDateContext = new ThreadLocal<>();
+private static final ThreadLocal<ActionContext> actionContext = new ThreadLocal<>();
+```
+
+The `tenantContext` entry is populated by `TenantAwareBasicAuthenticationFilter` on every authenticated request and drives the `RoutingDataSource` decision at connection-acquisition time. The `businessDateContext` map stores the current business date and COB date for the tenant, loaded from the database after authentication.
+
+<Warning>
+Never call `ThreadLocalContextUtil.getTenant()` from a `@Async` or `@Scheduled` method unless you have explicitly propagated the tenant context. Spring creates new threads for these callbacks, and the `ThreadLocal` will be empty. Batch job code uses `TenantDetailsService.findAllTenants()` to iterate tenants explicitly.
+</Warning>
+
+## Routing DataSource
+
+The `RoutingDataSource` class (`org.apache.fineract.infrastructure.core.service.database.RoutingDataSource`) is annotated `@Primary @Service("dataSource")` and registered as the single `javax.sql.DataSource` bean visible to Hibernate and `JdbcTemplate`. It extends Spring's `AbstractDataSource` and delegates all `getConnection()` calls to `RoutingDataSourceServiceFactory.determineDataSourceService().retrieveDataSource()`.
+
+The concrete `RoutingDataSourceService` implementation is `TomcatJdbcDataSourcePerTenantService`, which maintains a `ConcurrentHashMap<Long, DataSource>` keyed on `FineractPlatformTenantConnection.connectionId`. On the first request for a tenant it calls `DataSourcePerTenantServiceFactory.createNewDataSourceFor()` to build and cache a `HikariCP` `DataSource` configured with the tenant's JDBC coordinates. Subsequent requests reuse the cached pool.
+
+```java
+// TomcatJdbcDataSourcePerTenantService.java (simplified)
+public DataSource retrieveDataSource() {
+    DataSource actualDataSource = this.tenantDataSource; // fallback: tenant store DB
+    final FineractPlatformTenant tenant = ThreadLocalContextUtil.getTenant();
+    if (tenant != null) {
+        final FineractPlatformTenantConnection tenantConnection = tenant.getConnection();
+        Long key = tenantConnection.getConnectionId();
+        actualDataSource = TENANT_TO_DATA_SOURCE_MAP.computeIfAbsent(key,
+            (k) -> dataSourcePerTenantServiceFactory.createNewDataSourceFor(tenant, tenantConnection));
+    }
+    return actualDataSource;
+}
+```
+
+## Tenant Details Service
+
+`TenantDetailsService` (in `org.apache.fineract.infrastructure.core.service.tenant`) is the interface for loading tenant records:
+
+```java
+public interface TenantDetailsService {
+    FineractPlatformTenant loadTenantById(String tenantId);
+    List<FineractPlatformTenant> findAllTenants();
+}
+```
+
+`JdbcTenantDetailsService` implements this interface by querying the `fineract_tenants` database (the dedicated tenant-store schema) over a dedicated `hikariTenantDataSource` bean — separate from the per-tenant pools. Results of `loadTenantById` are cached in a Spring `@Cacheable("tenantsById")` cache.
+
+## Pagination Helper
+
+`PaginationHelper` (`org.apache.fineract.infrastructure.core.service`) provides a uniform JDBC pagination API across MySQL and PostgreSQL. It wraps a `JdbcTemplate.query()` call and runs a `COUNT(*)` query derived from the same SQL to build a `Page<E>` result:
+
+```java
+// PaginationHelper.java
+public <E> Page<E> fetchPage(final JdbcTemplate jt, final String sqlFetchRows,
+        final Object[] args, final RowMapper<E> rowMapper) {
+    final List<E> items = jt.query(sqlFetchRows, rowMapper, args);
+    final String sqlCountRows = sqlGenerator.countLastExecutedQueryResult(sqlFetchRows);
+    final Integer totalFilteredRecords = jt.queryForObject(sqlCountRows, Integer.class, args);
+    return new Page<>(items, totalFilteredRecords);
+}
+```
+
+`DatabaseSpecificSQLGenerator` (also in the `database` sub-package) handles dialect differences in `COUNT` query construction between PostgreSQL and MySQL.
+
+## Serialization
+
+The `org.apache.fineract.infrastructure.core.serialization` package provides:
+
+- **`ToApiJsonSerializer<T>`** — interface for converting domain objects to JSON strings with optional field filtering (`fields=x,y,z` query parameter). Implementations use Google Gson.
+- **`GoogleGsonSerializerHelper`** — factory for `Gson` instances configured with Fineract's custom type adapters (dates, monetary amounts).
+- **`FromJsonHelper`** — utility for parsing inbound JSON request bodies with typed accessor methods (`extractStringNamed`, `extractLongNamed`, etc.), used extensively in command assemblers.
+- **`JsonCommand`** — wraps the raw JSON string plus the `CommandWrapper` metadata and provides typed extraction methods to command handlers. Lives in `org.apache.fineract.infrastructure.core.api`.
+
+## Command SPI
+
+The command-processing service provider interface lives in `org.apache.fineract.commands` (within `fineract-core`). The key types are:
+
+| Class/Interface | Location | Role |
+|---|---|---|
+| `NewCommandSourceHandler` | `commands.handler` | SPI implemented by all write command handlers |
+| `CommandType` | `commands.annotation` | Annotation marking a handler with `entity` + `action` |
+| `CommandWrapper` | `commands.domain` | Immutable value object describing a command invocation |
+| `CommandSource` | `commands.domain` | JPA entity persisted to `m_portfolio_command_source` |
+| `CommandProcessingService` | `commands.service` | Interface for `executeCommand()` |
+| `PortfolioCommandSourceWritePlatformService` | `commands.service` | Entry point for resource classes |
+| `CommandHandlerProvider` | `commands.provider` | Discovers and dispatches to handlers via `ApplicationContext` |
+
+For complete details on command dispatch and maker-checker, see [Command Pattern](/core/command-pattern).
+
+## Event SPI
+
+`fineract-core` defines the business event interfaces in `org.apache.fineract.infrastructure.event.business`:
+
+- **`BusinessEvent<T>`** — marker interface with `getType()`, `getCategory()`, `getAggregateRootId()`, and `get()` methods
+- **`AbstractBusinessEvent<T>`** — base implementation storing the domain object passed at construction
+- **`BusinessEventListener<T>`** — SPI for receiving pre- or post-event notifications
+- **`BusinessEventNotifierService`** — service interface for firing events and registering listeners programmatically
+
+See [Event System](/core/event-system) for the full pipeline including external event persistence and Kafka/JMS publishing.
+
+## Key Utility Classes
+
+<Accordion title="DateUtils">
+`org.apache.fineract.infrastructure.core.service.DateUtils` centralizes all date/time operations. It reads the tenant's `timezoneId` from `ThreadLocalContextUtil.getTenant()` to convert between `LocalDate` and `OffsetDateTime` correctly across time zones. Always prefer this class over `LocalDate.now()` in domain logic.
+</Accordion>
+
+<Accordion title="MathUtil">
+`org.apache.fineract.infrastructure.core.service.MathUtil` provides `BigDecimal` arithmetic helpers with controlled rounding. The rounding mode is configured via `fineract.tenant.config.rounding-mode` and initialized from `FineractProperties`.
+</Accordion>
+
+<Accordion title="SearchParameters">
+`org.apache.fineract.infrastructure.core.service.SearchParameters` is a query-parameter DTO used by read services to accept `offset`, `limit`, `orderBy`, `sortOrder`, and `sqlSearch` from inbound requests. It is validated and passed to `PaginationHelper` or directly to `JdbcTemplate`.
+</Accordion>
+
+<Accordion title="ExternalIdFactory">
+`org.apache.fineract.infrastructure.core.service.ExternalIdFactory` generates `ExternalId` instances from string values. Domain services call this when creating entities that require stable external identifiers.
+</Accordion>

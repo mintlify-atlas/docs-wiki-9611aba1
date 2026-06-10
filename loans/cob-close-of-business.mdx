@@ -1,0 +1,260 @@
+---
+title: "Close of Business: Spring Batch Loan Processing Pipeline"
+sidebarTitle: "COB Pipeline"
+description: "Architecture of the LOAN_COB Spring Batch job: partitioned execution, LoanAccountLock, configurable business steps, inline COB, catch-up API, and working-capital COB."
+---
+
+Close of Business (COB) is Fineract's nightly batch pipeline that applies end-of-day accounting and risk operations to every active loan. It runs as a Spring Batch job named `LOAN_COB` (constant `LoanCOBConstant.JOB_NAME`). The pipeline uses remote-partitioned execution to split the loan population across multiple worker nodes, locks each loan before processing, applies an ordered sequence of configurable business steps, and unlocks loans when finished. The framework is defined in `fineract-cob` and wired into the running application by `fineract-provider`.
+
+## High-level batch flow
+
+```mermaid
+flowchart TD
+    A([Scheduler triggers LOAN_COB]) --> B[ResolveLoanCOBCustomJobParametersTasklet]
+    B --> C[LoanCOBPartitioner\npartitions loan IDs by chunk size]
+    C -->|partition_0..N| D[loanCOBWorkerStep\nRemote partition workers]
+    D --> E[ApplyLoanLockTasklet\nlocks chunk of loan IDs]
+    E --> F[LoanItemReader\nloads Loan entities]
+    F --> G[LoanItemProcessor\nruns COBBusinessStepService.run()]
+    G --> H[LoanItemWriter\npersists changed entities]
+    H --> I[UnlockProcessedLoansTasklet]
+    C --> J[StayedLockedLoansTasklet\nreports loans that were already locked]
+    I --> K([Job complete])
+    J --> I
+```
+
+Manager and worker roles are separated by `BatchManagerCondition` and `BatchWorkerCondition`. The manager runs `LoanCOBManagerConfiguration`; workers run `LoanCOBWorkerConfiguration`. In a single-node deployment both conditions activate on the same process.
+
+## Job definition — `LoanCOBManagerConfiguration`
+
+`LoanCOBManagerConfiguration` (`fineract-provider/.../cob/loan/LoanCOBManagerConfiguration.java`) assembles the Spring Batch `Job`:
+
+```java
+// fineract-provider/.../cob/loan/LoanCOBManagerConfiguration.java
+@Bean(name = "loanCOBJob")
+public Job loanCOBJob(LoanCOBPartitioner partitioner) {
+    return new JobBuilder(JobName.LOAN_COB.name(), jobRepository)
+        .listener(new COBExecutionListenerRunner(applicationContext, JobName.LOAN_COB.name()))
+        .start(resolveCustomJobParametersStep())   // parse custom parameters
+        .next(loanCOBStep(partitioner))            // partitioned fan-out to workers
+        .next(stayedLockedStep())                  // detect loans that never unlocked
+        .next(unlockProcessedLoansStep())          // release remaining locks
+        .incrementer(new RunIdIncrementer())
+        .build();
+}
+```
+
+The `COBExecutionListenerRunner` fires `FineractCOBBeforeJobListener` and `FineractCOBAfterJobListener` which in turn publish `BusinessEvent`s for external integrations.
+
+## Partitioning — `LoanCOBPartitioner`
+
+`LoanCOBPartitioner` (`fineract-provider/.../cob/loan/LoanCOBPartitioner.java`) extends `CommonPartitioner` and implements Spring Batch `Partitioner`. On each invocation:
+
+1. Queries `RetrieveAllNonClosedIdServiceImpl` for all non-closed loan IDs that are due for processing (business date minus `COBConstant.NUMBER_OF_DAYS_BEHIND = 1`).
+2. Fetches the ordered set of enabled business steps from `COBBusinessStepService.getCOBBusinessSteps(LoanCOBBusinessStep.class, LOAN_COB_JOB_NAME)`.
+3. Splits loan IDs into partitions of `propertyService.getPartitionSize(JOB_NAME)` items and returns one `ExecutionContext` per partition.
+
+```java
+// fineract-provider/.../cob/loan/LoanCOBPartitioner.java
+@Override
+public Map<String, ExecutionContext> partition(int gridSize) {
+    int partitionSize = propertyService.getPartitionSize(LoanCOBConstant.JOB_NAME);
+    Set<BusinessStepNameAndOrder> cobBusinessSteps =
+        cobBusinessStepService.getCOBBusinessSteps(
+            LoanCOBBusinessStep.class, LoanCOBConstant.LOAN_COB_JOB_NAME);
+    return getPartitions(partitionSize, cobBusinessSteps);
+}
+```
+
+## Worker step — `LoanCOBWorkerConfiguration`
+
+Each worker chunk follows the classic Spring Batch reader → processor → writer pattern defined in `LoanCOBWorkerConfiguration`:
+
+- **Reader** (`LoanItemReader` / `AbstractLoanItemReader`): Loads `Loan` entities from `LoanRepository` for the IDs in the current partition. Uses `BeforeStepLockingItemReaderHelper` to acquire `LoanAccountLock` records before reading starts.
+- **Processor** (`LoanItemProcessor` / `AbstractLoanItemProcessor`): Calls `COBBusinessStepService.run(executionMap, loan)` which iterates the ordered business steps and chains the `Loan` result through each.
+- **Writer** (`LoanItemWriter` / `AbstractLoanItemWriter`): Persists the modified `Loan` (and any new `LoanTransaction` records) in a single transaction per chunk.
+
+Fault tolerance is enabled: the step is configured `.faultTolerant()` with `ChunkProcessingLoanItemListener` and `CobWorkerStepListener` that capture per-loan failures without aborting the whole chunk.
+
+## Loan locking mechanism — `LoanAccountLock`
+
+`LoanAccountLock` (`fineract-provider/.../cob/domain/LoanAccountLock.java`) is mapped to `m_loan_account_locks`. A loan is locked before processing and unlocked afterward:
+
+```java
+@Entity
+@Table(name = "m_loan_account_locks")
+public class LoanAccountLock extends AccountLock {
+
+    public LoanAccountLock(Long loanId, LockOwner lockOwner,
+            LocalDate lockPlacedOnCobBusinessDate) {
+        super(loanId, lockOwner, lockPlacedOnCobBusinessDate);
+    }
+}
+```
+
+`LockOwner` has two values: `LOAN_COB_CHUNK_PROCESSING` (batch COB) and `LOAN_INLINE_COB_PROCESSING` (on-demand inline COB). `LoanLockingServiceImpl` wraps the `AccountLockRepository` and enforces that a lock held by chunk processing cannot be overridden by inline COB (throws `AccountLockCannotBeOverruledException`), but an inline lock can be replaced by chunk COB.
+
+Any loan with an active lock at transaction submission time is processed synchronously via inline COB before the API call proceeds—see the inline COB section below.
+
+## `COBBusinessStepService` — the step execution engine
+
+`COBBusinessStepService` (`fineract-cob/.../COBBusinessStepService.java`) is the SPI runner:
+
+```java
+public interface COBBusinessStepService {
+
+    <T extends COBBusinessStep<S>, S extends AbstractPersistableCustom<Long>>
+        S run(TreeMap<Long, String> executionMap, S item);
+
+    @NonNull
+    <T extends COBBusinessStep<S>, S extends AbstractPersistableCustom<Long>>
+        Set<BusinessStepNameAndOrder> getCOBBusinessSteps(
+            Class<T> businessStepClass, String cobJobName);
+}
+```
+
+The `executionMap` is a `TreeMap<Long, String>` where keys are step order positions and values are bean names. `COBBusinessStepServiceImpl` resolves each bean by name from the `ApplicationContext` and invokes `step.execute(loan)`, returning the (possibly modified) `Loan` for the next step.
+
+## `LoanCOBBusinessStep` — the per-step SPI
+
+Any class that implements `LoanCOBBusinessStep` (`fineract-loan/.../cob/loan/LoanCOBBusinessStep.java`) — itself extending `COBBusinessStep<Loan>` — and is annotated `@Component` is automatically eligible to be registered in the COB pipeline:
+
+```java
+// fineract-loan/.../cob/loan/LoanCOBBusinessStep.java
+public interface LoanCOBBusinessStep extends COBBusinessStep<Loan> {
+    // inherits:
+    Loan execute(Loan input);
+    String getEnumStyledName();   // used as the step identifier in m_batch_business_steps
+    String getHumanReadableName();
+}
+```
+
+## Built-in business steps
+
+| Class | `getEnumStyledName()` | What it does |
+|---|---|---|
+| `ApplyChargeToOverdueLoansBusinessStep` | `APPLY_CHARGE_TO_OVERDUE_LOANS` | Queries overdue installments and calls `LoanChargeWritePlatformService.applyOverdueChargesForLoan` |
+| `SetLoanDelinquencyTagsBusinessStep` | `LOAN_DELINQUENCY_CLASSIFICATION` | Calls `LoanAccountDomainService.setLoanDelinquencyTag`; fires `LoanDelinquencyRangeChangeBusinessEvent` |
+| `UpdateLoanArrearsAgingBusinessStep` | `UPDATE_LOAN_ARREARS_AGING` | Delegates to `LoanArrearsAgeingUpdateHandler.updateLoanArrearsAgeingDetails` |
+| `LoanInterestRecalculationCOBBusinessStep` | `LOAN_INTEREST_RECALCULATION` | Calls `LoanWritePlatformService.recalculateInterest(loan)` for interest-bearing loans with overdue installments |
+| `AddPeriodicAccrualEntriesBusinessStep` | `ADD_PERIODIC_ACCRUAL_ENTRIES` | Calls `LoanAccrualsProcessingService.addPeriodicAccruals` |
+| `AccrualActivityPostingBusinessStep` | `ACCRUAL_ACTIVITY_POSTING` | Posts accrual activity journal entries |
+| `CheckLoanRepaymentDueBusinessStep` | `CHECK_LOAN_REPAYMENT_DUE` | Fires `LoanRepaymentDueBusinessEvent` for instalments approaching due date |
+| `CheckLoanRepaymentOverdueBusinessStep` | `CHECK_LOAN_REPAYMENT_OVERDUE` | Fires `LoanRepaymentOverdueBusinessEvent` |
+| `CheckDueInstallmentsBusinessStep` | `CHECK_DUE_INSTALLMENTS` | Validates and flags due installments |
+| `BuyDownFeeAmortizationBusinessStep` | `BUY_DOWN_FEE_AMORTIZATION` | Amortizes buy-down fee balance (progressive loans) |
+| `CapitalizedIncomeAmortizationBusinessStep` | `CAPITALIZED_INCOME_AMORTIZATION` | Amortizes capitalized income balance (progressive loans) |
+
+All classes are in `fineract-provider/.../cob/loan/`.
+
+## Configuring business steps — `BatchBusinessStep`
+
+Step order and enablement are persisted in `m_batch_business_steps` via the `BatchBusinessStep` JPA entity (`fineract-cob/.../domain/BatchBusinessStep.java`):
+
+```java
+@Entity
+@Table(name = "m_batch_business_steps")
+public class BatchBusinessStep extends AbstractPersistableCustom<Long> {
+    private String jobName;    // e.g. "LOAN_CLOSE_OF_BUSINESS"
+    private String stepName;   // e.g. "APPLY_CHARGE_TO_OVERDUE_LOANS"
+    private Long stepOrder;    // lower numbers run first
+}
+```
+
+The `ConfigureBusinessStepApiResource` exposes `GET /v1/jobs/{jobName}/steps` to list configured steps and `PUT /v1/jobs/{jobName}/steps` to update them. The `BusinessStepConfigUpdateHandler` validates that the step name matches a registered `LoanCOBBusinessStep` bean before persisting.
+
+### Adding a custom business step
+
+To add a custom COB step to an existing Fineract deployment:
+
+```java
+// 1. Implement LoanCOBBusinessStep in your module
+@Component
+public class MyCustomCOBStep implements LoanCOBBusinessStep {
+
+    @Override
+    public Loan execute(Loan loan) {
+        // your logic; return the (possibly modified) loan
+        return loan;
+    }
+
+    @Override
+    public String getEnumStyledName() {
+        return "MY_CUSTOM_STEP";   // must be unique; stored in m_batch_business_steps
+    }
+
+    @Override
+    public String getHumanReadableName() {
+        return "My custom step";
+    }
+}
+
+// 2. Register via PUT /v1/jobs/LOAN_CLOSE_OF_BUSINESS/steps
+// {
+//   "businessSteps": [
+//     { "stepName": "MY_CUSTOM_STEP", "order": 100 }
+//   ]
+// }
+```
+
+The step will appear in `COBBusinessStepService.getCOBBusinessSteps(...)` on the next job run.
+
+## Inline COB — on-demand processing
+
+When a user posts a transaction (e.g., repayment) against a loan that is behind on COB processing, Fineract needs to bring the loan up to date before applying the transaction. This is handled by the **inline COB** Spring Batch job:
+
+- Job name: `INLINE_LOAN_COB` (`LoanCOBConstant.INLINE_LOAN_COB_JOB_NAME`)
+- Configuration: `LoanInlineCOBConfig` (`fineract-provider/.../cob/loan/LoanInlineCOBConfig.java`)
+- Reader: `InlineCOBLoanItemReader` — reads loan IDs from `COBConstant.INLINE_IDS_PARAMETER_NAME`
+- Processor: `InlineCOBLoanItemProcessor` — runs the same `COBBusinessStepService` loop
+- Writer: `InlineCOBLoanItemWriter`
+- Listener: `InlineCOBLoanItemListener` — uses `LOAN_INLINE_COB_PROCESSING` lock owner
+
+The inline job runs synchronously in the same thread as the API request. `LoanLockingServiceImpl` checks for an existing `LOAN_COB_CHUNK_PROCESSING` lock; if present, the inline request is blocked until the batch lock releases.
+
+## Catch-up API — `LoanCOBCatchUpApiResource`
+
+When the nightly job misses one or more dates (e.g., due to downtime), the catch-up API replays COB for each skipped business date in sequence:
+
+```
+POST /v1/loans/catch-up
+GET  /v1/loans/oldest-cob-closed
+GET  /v1/loans/is-catch-up-running
+```
+
+`LoanCOBCatchUpApiResource` (`fineract-provider/.../cob/api/LoanCOBCatchUpApiResource.java`) delegates to `LoanCOBCatchUpServiceImpl`. A catch-up run walks forward from the oldest un-processed COB date to the current business date, firing a `LOAN_COB` job execution for each date.
+
+```java
+// fineract-provider/.../cob/api/LoanCOBCatchUpApiResource.java
+@POST
+@Path("catch-up")
+@Operation(summary = "Executes Loan COB Catch Up",
+           description = "Executes the Loan COB job on every day from the oldest Loan "
+                       + "to the current COB business date")
+@ApiResponse(responseCode = "202", description = "Catch Up has been started")
+@ApiResponse(responseCode = "400", description = "Catch Up is already running")
+public Response executeLoanCOBCatchUp() { ... }
+```
+
+## Working-capital loan COB
+
+`fineract-working-capital-loan` registers a parallel COB pipeline specifically for working-capital products:
+
+- Job name: `WC_LOAN_COB` (`WorkingCapitalLoanCOBConstant.WORKING_CAPITAL_JOB_NAME`)
+- Manager: `WorkingCapitalLoanCOBManagerConfiguration`
+- Worker: `WorkingCapitalLoanCOBWorkerConfiguration`
+- Lock entity: `WorkingCapitalLoanAccountLock` (`m_wc_loan_account_locks`)
+- Catch-up resource: `WorkingCapitalLoanCOBCatchUpApiResource`
+
+The architecture is identical to the standard loan COB but operates on a distinct loan set and lock table, preventing interference with the main pipeline.
+
+## Business date context
+
+COB runs under `ActionContext.COB` set via `ThreadLocalContextUtil`. Business steps that need to re-read the current date must call `DateUtils.getBusinessLocalDate()` rather than `LocalDate.now()`. The `LoanInterestRecalculationCOBBusinessStep` switches to `ActionContext.DEFAULT` briefly while calling `recalculateInterest` (which requires real-time date semantics) and then restores `ActionContext.COB` in a `finally` block.
+
+## Related pages
+
+- [Loan Module](/loans/loan-module) — `Loan` entity and service interfaces used by business steps
+- [Loan Lifecycle](/loans/loan-lifecycle) — status transitions triggered by COB steps
+- [Progressive Loan Engine](/loans/progressive-loan) — buy-down fee and capitalized income amortization steps
+- [Loan Origination](/loans/loan-origination) — originator enricher triggered by COB business events

@@ -1,0 +1,268 @@
+---
+title: "Accrual Accounting and Loan Loss Provisioning"
+sidebarTitle: "Accrual & Provisioning"
+description: "Periodic and upfront accrual accounting for loans, AccrualAccountingWritePlatformService, ProvisioningEntry, ProvisioningCriteria, and how provisioning generates GL entries."
+---
+
+Apache Fineract supports two accrual accounting modes — periodic and upfront — that post income and expense entries before cash is actually received. Independently, the provisioning subsystem lets administrators define loss-reserve rules based on loan delinquency age, generating GL entries that debit an expense account and credit a liability (loan-loss-reserve) account. Both subsystems rely on the same `JournalEntryWritePlatformService` to persist entries, but they are managed through separate API resources and triggered by different scheduled jobs.
+
+## Accrual vs. Cash Accounting
+
+| `AccountingRuleType` | Behaviour |
+|---|---|
+| `NONE (1)` | No GL entries are generated |
+| `CASH_BASED (2)` | Entries only when cash moves (disbursement, repayment, etc.) |
+| `ACCRUAL_PERIODIC (3)` | Accrues income/expense at regular intervals; settled on repayment |
+| `ACCRUAL_UPFRONT (4)` | Accrues the entire loan term's income on disbursement |
+
+Each loan product stores its rule in `m_loan_product.accounting_type`. The accounting processor selected at runtime is driven by this value.
+
+## Periodic Accrual
+
+### AccrualAccountingWritePlatformService
+
+The service interface lives in `fineract-accounting`:
+
+```
+fineract-accounting/src/main/java/org/apache/fineract/accounting/accrual/service/
+    AccrualAccountingWritePlatformService.java
+```
+
+The implementation is in `fineract-provider`:
+
+```java
+// fineract-provider/.../accounting/accrual/service/AccrualAccountingWritePlatformServiceImpl.java
+@RequiredArgsConstructor
+public class AccrualAccountingWritePlatformServiceImpl
+        implements AccrualAccountingWritePlatformService {
+
+    private final LoanAccrualsProcessingService loanAccrualsProcessingService;
+    private final AccrualAccountingDataValidator accountingDataValidator;
+
+    @Override
+    public CommandProcessingResult executeLoansPeriodicAccrual(JsonCommand command) {
+        this.accountingDataValidator.validateLoanPeriodicAccrualData(command.json());
+        LocalDate tillDate = command.localDateValueOfParameterNamed(ACCRUE_TILL_PARAM_NAME);
+        this.loanAccrualsProcessingService.addPeriodicAccruals(tillDate);
+        return CommandProcessingResult.empty();
+    }
+}
+```
+
+The `tillDate` parameter tells the engine to compute and post accruals for all active loans up to that date. The `LoanAccrualsProcessingService` (in `fineract-loan`) iterates active loans with `ACCRUAL_PERIODIC` products, computes the amount earned since the last accrual, and calls `JournalEntryWritePlatformService.createJournalEntriesForLoan()` with accrual-type transactions.
+
+### Triggering Periodic Accrual
+
+Periodic accrual is triggered via:
+
+```
+POST /v1/runaccruals
+Body: { "tillDate": "01 Aug 2024", "dateFormat": "dd MMM yyyy", "locale": "en" }
+```
+
+This is handled by `AccrualAccountingApiResource`:
+
+```
+fineract-accounting/.../accrual/api/AccrualAccountingApiResource.java
+```
+
+The command is `EXECUTE_ACCOUNTING_ACCRUALS` and the handler is `ExecutePeriodicAccrualCommandHandler`.
+
+### Accrual Journal Entries (Cash vs. Accrual)
+
+For a loan product with `ACCRUAL_PERIODIC`, on each accrual date the engine posts:
+
+| Type | Account | Example Amount |
+|---|---|---|
+| `DEBIT` | Interest Receivable (ASSET) | 83.33 |
+| `CREDIT` | Interest Income (INCOME) | 83.33 |
+
+When the borrower later makes a repayment, the cash-side entries reverse the receivable:
+
+| Type | Account | Amount |
+|---|---|---|
+| `DEBIT` | Cash / Fund Source (ASSET) | 83.33 |
+| `CREDIT` | Interest Receivable (ASSET) | 83.33 |
+
+## Upfront Accrual
+
+For `ACCRUAL_UPFRONT` products, the entire scheduled interest income is booked as a receivable on disbursement day. The accounting processor (`UpfrontAccrualBasedAccountingProcessorForLoan`) posts:
+
+| Type | Account | Amount |
+|---|---|---|
+| `DEBIT` | Loan Portfolio (ASSET) | Principal |
+| `CREDIT` | Fund Source (LIABILITY/ASSET) | Principal |
+| `DEBIT` | Interest Receivable (ASSET) | Total Interest |
+| `CREDIT` | Interest Income (INCOME) | Total Interest |
+
+Repayments then debit Cash and credit Interest Receivable (for the interest portion) and Loan Portfolio (for the principal portion).
+
+## Loan Loss Provisioning
+
+### ProvisioningCriteria
+
+A `ProvisioningCriteria` (mapped to `m_provisioning_criteria`) defines the risk bands for a set of loan products:
+
+```java
+@Entity
+@Table(name = "m_provisioning_criteria")
+public class ProvisioningCriteria extends AbstractAuditableCustom {
+
+    @Column(name = "criteria_name", nullable = false)
+    private String criteriaName;
+
+    @OneToMany(cascade = CascadeType.ALL, mappedBy = "criteria", ...)
+    Set<ProvisioningCriteriaDefinition> provisioningCriteriaDefinition;
+
+    @OneToMany(cascade = CascadeType.ALL, mappedBy = "criteria", ...)
+    Set<LoanProductProvisionCriteria> loanProductMapping; // Which products this applies to
+}
+```
+
+### ProvisioningCriteriaDefinition
+
+Each definition row maps a delinquency age band to a provisioning percentage and two GL accounts:
+
+```java
+@Entity
+@Table(name = "m_provisioning_criteria_definition")
+public class ProvisioningCriteriaDefinition extends AbstractPersistableCustom<Long> {
+
+    @ManyToOne
+    @JoinColumn(name = "category_id", nullable = false)
+    private ProvisioningCategory provisioningCategory; // STANDARD, SUB-STANDARD, etc.
+
+    @Column(name = "min_age", nullable = false)
+    private Long minimumAge;    // Minimum overdue days for this band
+
+    @Column(name = "max_age", nullable = false)
+    private Long maximumAge;    // Maximum overdue days (use Long.MAX_VALUE for open-ended)
+
+    @Column(name = "provision_percentage", nullable = false)
+    private BigDecimal provisioningPercentage; // e.g. 5.00 means 5%
+
+    @ManyToOne
+    @JoinColumn(name = "liability_account", nullable = false)
+    private GLAccount liabilityAccount;  // Loan Loss Reserve (LIABILITY)
+
+    @ManyToOne
+    @JoinColumn(name = "expense_account", nullable = false)
+    private GLAccount expenseAccount;    // Provisioning Expense (EXPENSE)
+}
+```
+
+### ProvisioningEntry and LoanProductProvisioningEntry
+
+A `ProvisioningEntry` (mapped to `m_provisioning_history`) is a point-in-time snapshot of computed reserves:
+
+```java
+@Entity
+@Table(name = "m_provisioning_history")
+public class ProvisioningEntry extends AbstractPersistableCustom<Long> {
+
+    @Column(name = "journal_entry_created")
+    private Boolean isJournalEntryCreated;
+
+    @OneToMany(cascade = CascadeType.ALL, mappedBy = "entry", ...)
+    private Set<LoanProductProvisioningEntry> provisioningEntries;
+
+    @Column(name = "created_date")
+    private LocalDate createdDate;
+}
+```
+
+`LoanProductProvisioningEntry` (mapped to `m_loanproduct_provisioning_entry`) holds the per-product, per-office, per-category computed reserve:
+
+```java
+@Entity
+@Table(name = "m_loanproduct_provisioning_entry")
+public class LoanProductProvisioningEntry extends AbstractPersistableCustom<Long> {
+
+    @Column(name = "criteria_id")
+    private Long criteriaId;
+
+    @ManyToOne
+    @JoinColumn(name = "office_id")
+    private Office office;
+
+    @Column(name = "currency_code")
+    private String currencyCode;
+
+    @ManyToOne
+    @JoinColumn(name = "product_id")
+    private LoanProduct loanProduct;
+
+    @ManyToOne
+    @JoinColumn(name = "category_id")
+    private ProvisioningCategory provisioningCategory;
+
+    @Column(name = "overdue_in_days")
+    private Long overdueInDays;
+
+    @Column(name = "reseve_amount")     // Note: "reseve_amount" is the actual column name
+    private BigDecimal reservedAmount;  // provisioningPercentage × outstanding principal
+
+    @ManyToOne
+    @JoinColumn(name = "liability_account")
+    private GLAccount liabilityAccount;
+
+    @ManyToOne
+    @JoinColumn(name = "expense_account")
+    private GLAccount expenseAccount;
+}
+```
+
+### Provisioning Lifecycle
+
+```mermaid
+flowchart TD
+    A[POST /v1/provisioningentries\nCreate provisioning snapshot] --> B[ProvisioningEntriesWritePlatformService\n.createProvisioningEntries()]
+    B --> C[Iterate active loans]
+    C --> D[Match loan to ProvisioningCriteria\nby product and overdue days]
+    D --> E[Compute reservedAmount =\noutstanding × percentage]
+    E --> F[Persist ProvisioningEntry +\nLoanProductProvisioningEntries]
+    F --> G{Create journal\nentries now?}
+    G -->|POST .../createjournalentry| H[JournalEntryWritePlatformService\n.createProvisioningJournalEntries()]
+    H --> I[DEBIT expenseAccount\nfor each entry]
+    H --> J[CREDIT liabilityAccount\nfor each entry]
+```
+
+### Creating Provisioning Journal Entries
+
+Provisioning entries and their GL entries are a two-step operation:
+
+```
+Step 1: POST /v1/provisioningentries
+        → Creates ProvisioningEntry rows (isJournalEntryCreated = false)
+
+Step 2: POST /v1/provisioningentries/{id}?command=createjournalentry
+        → Calls ProvisioningEntriesWritePlatformService.createProvisioningJournalEntries()
+        → Sets isJournalEntryCreated = true
+```
+
+Inside step 2, `JournalEntryWritePlatformService.createProvisioningJournalEntries(ProvisioningEntry entry)` iterates all `LoanProductProvisioningEntry` rows, posting a DEBIT to the expense account and a CREDIT to the liability account for each row.
+
+To reverse a provisioning journal entry:
+
+```
+POST /v1/provisioningentries/{id}?command=revertjournalentry
+```
+
+This calls `JournalEntryWritePlatformService.revertProvisioningJournalEntries()` which creates mirror entries.
+
+## REST API Summary
+
+| Resource | Path | Purpose |
+|---|---|---|
+| `AccrualAccountingApiResource` | `POST /v1/runaccruals` | Trigger periodic accrual up to a date |
+| `ProvisioningEntriesApiResource` | `POST /v1/provisioningentries` | Create provisioning snapshot |
+| `ProvisioningEntriesApiResource` | `GET /v1/provisioningentries` | List snapshots |
+| `ProvisioningEntriesApiResource` | `POST /v1/provisioningentries/{id}?command=createjournalentry` | Post GL entries for snapshot |
+| `ProvisioningEntriesApiResource` | `POST /v1/provisioningentries/{id}?command=revertjournalentry` | Reverse provisioning GL entries |
+| `ProvisioningCriteriaApiResource` | `GET/POST /v1/provisioningcriteria` | Manage provisioning criteria |
+
+## Related Pages
+
+- [GL Accounts](/accounting/gl-accounts) — `liabilityAccount` and `expenseAccount` GL references in criteria definitions
+- [Journal Entries](/accounting/journal-entries) — `JournalEntryWritePlatformService` that posts the actual entries
+- [Savings Module](/savings/savings-module) — accrual transaction type (`ACCRUAL`) on savings accounts

@@ -1,0 +1,285 @@
+---
+title: "Integration Tests: REST API Testing Against a Live Server"
+sidebarTitle: "Integration Tests"
+description: "The integration-tests Gradle module, REST-assured helpers, environment variable wiring, test sharding in CI, and how to run against a local Fineract instance."
+---
+
+The `:integration-tests` Gradle subproject contains over 150 test classes that exercise the Fineract REST API end-to-end against a running server. Tests use [REST-assured](https://rest-assured.io/) 5.5.7 for HTTP interactions and JUnit 5 for lifecycle management. Unlike unit tests in individual modules, these require a fully started Fineract process with a live database; they verify JSON request/response contracts, business logic outcomes, and system behaviors that span multiple API endpoints.
+
+## Module Layout
+
+```
+integration-tests/
+├── build.gradle
+├── dependencies.gradle
+└── src/test/java/org/apache/fineract/integrationtests/
+    ├── ConfigProperties.java           # env-var wiring for server coordinates
+    ├── BaseLoanIntegrationTest.java     # base class with shared loan DSL
+    ├── ClientLoanIntegrationTest.java
+    ├── ClientSavingsIntegrationTest.java
+    ├── AdvancedPaymentAllocationLoanRepaymentScheduleTest.java
+    ├── cob/
+    │   └── CobPartitioningTest.java
+    ├── common/
+    │   ├── Utils.java                   # REST-assured spec builders
+    │   ├── ClientHelper.java
+    │   ├── loans/
+    │   │   ├── LoanTransactionHelper.java
+    │   │   └── LoanApplicationTestBuilder.java
+    │   ├── savings/
+    │   │   └── SavingsAccountHelper.java
+    │   └── accounting/
+    │       └── AccountHelper.java
+    └── loan/
+        ├── LoanApiIntegrationTest.java
+        ├── repayment/
+        ├── reaging/
+        └── reamortization/
+```
+
+## Server Connection
+
+`ConfigProperties.java` reads connection details from environment variables with sensible localhost defaults:
+
+```java
+// integration-tests/src/test/java/org/apache/fineract/integrationtests/ConfigProperties.java
+public class ConfigProperties {
+
+    public static class Backend {
+        public static final String PROTOCOL =
+            getValueFromEnvOrDefault("BACKEND_PROTOCOL", "https");
+        public static final String HOST =
+            getValueFromEnvOrDefault("BACKEND_HOST", "localhost");
+        public static final Integer PORT =
+            Integer.parseInt(getValueFromEnvOrDefault("BACKEND_PORT", "8443"));
+        public static final String USERNAME =
+            getValueFromEnvOrDefault("BACKEND_USERNAME", "mifos");
+        public static final String PASSWORD =
+            getValueFromEnvOrDefault("BACKEND_PASSWORD", "password");
+        public static final String TENANT =
+            getValueFromEnvOrDefault("BACKEND_TENANT", "default");
+    }
+
+    public static class ExternalServices {
+        public static final String HOST =
+            getValueFromEnvOrDefault("FINERACT_TEST_EXTERNAL_HOST", "localhost");
+    }
+}
+```
+
+`Utils.java` in `common/` builds the REST-assured `RequestSpecification` using these coordinates:
+
+```java
+// integration-tests/src/test/java/org/apache/fineract/integrationtests/common/Utils.java
+import io.restassured.RestAssured;
+import io.restassured.builder.RequestSpecBuilder;
+
+RestAssured.baseURI = ConfigProperties.Backend.PROTOCOL + "://"
+    + ConfigProperties.Backend.HOST;
+RestAssured.port = ConfigProperties.Backend.PORT;
+RestAssured.basePath = "/fineract-provider/api/v1";
+
+RequestSpecification requestSpec = new RequestSpecBuilder()
+    .setContentType(ContentType.JSON)
+    .addHeader("Authorization", "Basic " + encodeCredentials(...))
+    .addHeader("Fineract-Platform-TenantId", ConfigProperties.Backend.TENANT)
+    .setRelaxedHTTPSValidation()
+    .build();
+```
+
+The `setRelaxedHTTPSValidation()` call bypasses TLS certificate verification, which is appropriate for the self-signed development certificate (`keystore.jks`).
+
+## Helper Utilities
+
+The `common/` package contains helper classes that abstract REST-assured calls into readable Java DSLs. Each helper receives a `RequestSpecification` and `ResponseSpecification` from the calling test.
+
+### `LoanTransactionHelper`
+
+The most feature-rich helper, located at `integration-tests/src/test/java/org/apache/fineract/integrationtests/common/loans/LoanTransactionHelper.java`. It covers the full loan lifecycle:
+
+- `getLoanDetail(requestSpec, responseSpec, loanId)` → `GetLoansLoanIdResponse`
+- `disburseLoan(loanId, date, amount, requestSpec, responseSpec)`
+- `makeRepayment(date, amount, loanId, requestSpec, responseSpec)`
+- `applyForLoanApplication(requestSpec, responseSpec, loanProductId, ...)`
+- `approveLoan(approvalDate, loanId, requestSpec, responseSpec)`
+- `addChargeForLoan(loanId, chargeJson, requestSpec)`
+- `waiveChargesForLoan(loanId, chargeId, requestSpec, responseSpec)`
+- `getLoanRepaymentSchedule(requestSpec, responseSpec, loanId)` → `GetLoansLoanIdRepaymentSchedule`
+
+It uses the generated `fineract-client` models (e.g., `PostLoansRequest`, `PostLoansLoanIdResponse`, `GetLoansLoanIdTransactions`) for type-safe request/response handling.
+
+### `SavingsAccountHelper`
+
+Located at `integration-tests/.../common/savings/SavingsAccountHelper.java`. Key methods:
+
+- `applyForSavingsApplication(requestSpec, responseSpec, clientId, savingsProductId)`
+- `approveSavings(requestSpec, responseSpec, savingsId)`
+- `activateSavings(requestSpec, responseSpec, savingsId)`
+- `depositToSavingsAccount(requestSpec, responseSpec, savingsId, amount, date)`
+- `withdrawalFromSavingsAccount(requestSpec, responseSpec, savingsId, amount, date)`
+
+### `ClientHelper`
+
+Located at `integration-tests/.../common/ClientHelper.java`. Creates and activates client entities used as prerequisites by loan and savings tests:
+
+- `createClient(requestSpec, responseSpec)` — creates with default attributes
+- `createClientAsEntity(requestSpec, responseSpec)` — creates a corporate client
+- `activateClient(requestSpec, responseSpec, clientId)`
+- `getClient(requestSpec, responseSpec, clientId)`
+
+### Other Notable Helpers
+
+| Helper | Package | Description |
+|---|---|---|
+| `GlobalConfigurationHelper` | `common` | Toggle global platform flags (e.g., enable business dates, COB) |
+| `BusinessDateHelper` | `common` | Set the business date for COB-dependent tests |
+| `SchedulerJobHelper` | `common` | Trigger and wait for scheduled batch jobs |
+| `ExternalAssetOwnerHelper` | `common` | Asset externalization (investor transfers) |
+| `AccountHelper` | `common/accounting` | Chart of accounts management |
+| `LoanRescheduleRequestHelper` | `common` | Loan reschedule workflows |
+| `BatchHelper` | `common` | Batch API (compound request) calls |
+
+## Base Test Class
+
+`BaseLoanIntegrationTest` provides a shared DSL for loan integration tests. It initialises REST-assured specs, builds `LoanTransactionHelper` and `ClientHelper` instances, and exposes assertion utilities for loan schedule verification:
+
+```java
+// integration-tests/.../BaseLoanIntegrationTest.java (excerpt)
+@Slf4j
+public abstract class BaseLoanIntegrationTest {
+
+    protected RequestSpecification requestSpec;
+    protected ResponseSpecification responseSpec;
+    protected LoanTransactionHelper loanTransactionHelper;
+    protected ClientHelper clientHelper;
+
+    @BeforeEach
+    public void setUp() {
+        Utils.initializeRESTAssured();
+        requestSpec = new RequestSpecBuilder()
+            .setContentType(ContentType.JSON)
+            .build();
+        requestSpec.header("Authorization",
+            "Basic " + Utils.loginIntoServerAndGetBase64EncodedAuthenticationKey());
+        responseSpec = new ResponseSpecBuilder().expectStatusCode(200).build();
+        loanTransactionHelper = new LoanTransactionHelper(requestSpec, responseSpec);
+        clientHelper = new ClientHelper(requestSpec, responseSpec);
+    }
+}
+```
+
+Most loan tests extend this class and override only the test methods, keeping boilerplate out of individual test classes.
+
+## Running Integration Tests Locally
+
+Start a Fineract instance first:
+
+```bash
+# Option 1: Docker Compose (PostgreSQL)
+docker compose -f docker-compose-postgresql.yml up -d
+# Wait for health check
+curl -k https://localhost:8443/fineract-provider/actuator/health
+
+# Option 2: Direct bootRun (requires local PostgreSQL)
+./gradlew :fineract-provider:bootRun
+```
+
+Then run all integration tests against the running instance. The `integration-tests` module uses a custom `waitForFineract` Gradle task to poll the actuator before executing tests:
+
+```bash
+./gradlew :integration-tests:test
+```
+
+To run a specific test class:
+
+```bash
+./gradlew :integration-tests:test \
+  --tests "org.apache.fineract.integrationtests.ClientLoanIntegrationTest"
+```
+
+To run against a non-default host:
+
+```bash
+BACKEND_HOST=staging.example.com BACKEND_PORT=8443 \
+  ./gradlew :integration-tests:test
+```
+
+The test task is also parameterized via `excludeTests`:
+
+```bash
+./gradlew :integration-tests:test -PexcludeTests="**/CIOnly*"
+```
+
+`CIOnly.java` is a JUnit 5 tag annotation used to mark tests that require CI-only infrastructure (e.g., LocalStack S3, mock SMTP).
+
+## CI Sharding
+
+In `build-postgresql.yml` the test suite is sharded across 15 parallel runners. The `scripts/split-tests.sh` script partitions all discovered test classes into `shard-tests_N.txt` files. Each runner loads its shard file and invokes Gradle with the relevant `--tests` filters, grouping by Gradle submodule to minimise context switches and auth-mode restarts:
+
+```bash
+# scripts/split-tests.sh generates CSV files: module,classname
+# The CI workflow then runs:
+./gradlew :integration-tests:test \
+  --tests "org.apache.fineract.integrationtests.ClientLoanIntegrationTest" \
+  --tests "org.apache.fineract.integrationtests.AdvancedPaymentAllocationLoanRepaymentScheduleTest" \
+  ...
+```
+
+Two test modules — `:oauth2-tests` and `:twofactor-tests` — are always scheduled last in a shard because they require restarting the Fineract container in a different authentication mode.
+
+## Key Test Classes by Domain
+
+### Loans
+
+| Class | Coverage |
+|---|---|
+| `ClientLoanIntegrationTest` | Full loan lifecycle: apply → approve → disburse → repay |
+| `AdvancedPaymentAllocationLoanRepaymentScheduleTest` | EMI schedule generation with advanced payment allocation |
+| `AdvancedPaymentAllocationWaiveLoanCharges` | Charge waiver under advanced payment strategy |
+| `DelinquencyBucketsIntegrationTest` | Delinquency bucket and tag assignment |
+| `DelinquencyAndChargebackIntegrationTest` | Chargeback effect on delinquency |
+| `BlockTransactionsOnClosedOverpaidLoansTest` | Guard against writes on closed loans |
+| `ClientLoanMultipleDisbursementsIntegrationTest` | Tranche disbursement workflows |
+| `UndoLoanDisbursalWithDownPaymentIntegrationTest` | Undo disbursal when a down payment exists |
+| `LoanApiIntegrationTest` | API contract validation for all loan endpoints |
+| `FixedLengthLoanProductIntegrationTest` | Fixed-length loan product specific tests |
+
+### Savings
+
+| Class | Coverage |
+|---|---|
+| `ClientSavingsIntegrationTest` | Savings account lifecycle |
+| `SavingsAccountsTest` | Savings account CRUD and transactions |
+| `SavingsInterestPostingTest` | Interest posting job results |
+| `SavingsAccrualIntegrationTest` | Accrual accounting entries |
+| `FixedDepositTest` | Fixed deposit product workflows |
+
+### COB (Close of Business)
+
+| Class | Coverage |
+|---|---|
+| `cob/CobPartitioningTest` | Verifies COB partition fan-out and completion in distributed mode |
+| `SchedulerJobsTest` | Triggers and validates all scheduler-managed jobs |
+
+### Accounting
+
+| Class | Coverage |
+|---|---|
+| `AccountingScenarioIntegrationTest` | Full double-entry accounting scenarios |
+| `FinancialActivityAccountsTest` | Financial activity account mapping |
+
+### Other
+
+| Class | Coverage |
+|---|---|
+| `ActuatorIntegrationTest` | Health, info, and metrics endpoints |
+| `ApiDocsTest` | Validates OpenAPI JSON is present at `/fineract.json` |
+| `AuditIntegrationTest` | Audit log entries for mutations |
+| `ExternalBusinessEventTest` | External event publishing (Kafka/JMS) |
+| `BatchApiTest` | Batch (compound) API correctness |
+| `SwaggeruiTest` | Swagger UI endpoint availability |
+| `SqlInjectionReportingServiceIntegrationTest` | SQL injection protection in report parameters |
+
+---
+
+**See also:** [Cucumber E2E →](/testing/e2e-cucumber) · [Build System →](/deployment/build-system) · [Docker & Kubernetes →](/deployment/docker-kubernetes)

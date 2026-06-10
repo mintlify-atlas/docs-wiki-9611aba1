@@ -1,0 +1,222 @@
+---
+title: "Loan Origination Workflow and Application Processing"
+sidebarTitle: "Loan Origination"
+description: "The fineract-loan-origination module: LoanOriginator entity, mapping to loans, DataEnricher pattern, Avro enrichers, command handlers, and the feature flag."
+---
+
+The `fineract-loan-origination` Gradle module is an **optional, feature-flagged** extension that associates a loan application with one or more external originators—third-party agencies, digital channels, or brokers that sourced the application. The module does not alter the core loan processing flow; instead it attaches originator metadata to existing loan records and enriches outbound Avro event payloads with originator details. All classes are guarded by `@ConditionalOnProperty(value = "fineract.module.loan-origination.enabled", havingValue = "true")` so the module is a no-op unless explicitly enabled.
+
+## Domain model
+
+### `LoanOriginator`
+
+`LoanOriginator` (`fineract-loan-origination/.../domain/LoanOriginator.java`) is the registry entity for an originator. It is mapped to `m_loan_originator`:
+
+```java
+@Entity
+@Table(name = "m_loan_originator")
+public class LoanOriginator extends AbstractAuditableWithUTCDateTimeCustom<Long> {
+
+    @Column(name = "external_id", nullable = false, length = 100, unique = true)
+    private ExternalId externalId;
+
+    @Column(name = "name", length = 255)
+    private String name;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 20)
+    private LoanOriginatorStatus status;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "originator_type_cv_id")
+    private CodeValue originatorType;   // e.g. BROKER, DIGITAL_CHANNEL
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "channel_type_cv_id")
+    private CodeValue channelType;
+}
+```
+
+`LoanOriginatorStatus` is an enum (`ACTIVE` / `INACTIVE`) that controls whether an originator can be attached to new loans—validated by `LoanOriginatorNotActiveException`.
+
+### `LoanOriginatorMapping`
+
+`LoanOriginatorMapping` (`fineract-loan-origination/.../domain/LoanOriginatorMapping.java`) is the join record between a loan and an originator, mapped to `m_loan_originator_mapping`:
+
+```java
+@Entity
+@Table(name = "m_loan_originator_mapping")
+public class LoanOriginatorMapping extends AbstractAuditableWithUTCDateTimeCustom<Long> {
+
+    @Column(name = "loan_id", nullable = false)
+    private Long loanId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "originator_id", nullable = false)
+    private LoanOriginator originator;
+}
+```
+
+A single loan can be mapped to multiple originators. The mapping is created via `attachOriginatorToLoan` and removed with `detachOriginatorFromLoan`.
+
+## Service interfaces
+
+### `LoanOriginatorWritePlatformService`
+
+```java
+// fineract-loan-origination/.../service/LoanOriginatorWritePlatformService.java
+public interface LoanOriginatorWritePlatformService {
+    CommandProcessingResult create(JsonCommand command);
+    CommandProcessingResult update(Long id, JsonCommand command);
+    CommandProcessingResult delete(Long id);
+    CommandProcessingResult attachOriginatorToLoan(Long loanId, Long originatorId);
+    CommandProcessingResult detachOriginatorFromLoan(Long loanId, Long originatorId);
+}
+```
+
+The implementation `LoanOriginatorWritePlatformServiceImpl` delegates to `LoanOriginatorRepository` and `LoanOriginatorMappingRepository` (both extending Spring Data `JpaRepository`).
+
+### `LoanOriginatorReadPlatformService`
+
+```java
+// fineract-loan-origination/.../service/LoanOriginatorReadPlatformService.java
+public interface LoanOriginatorReadPlatformService {
+    List<LoanOriginatorData> retrieveAll();
+    LoanOriginatorData retrieveById(Long id);
+    LoanOriginatorData retrieveByExternalId(String externalId);
+    Long resolveIdByExternalId(String externalId);
+    List<LoanOriginatorData> retrieveByLoanId(Long loanId);
+    LoanOriginatorTemplateData retrieveTemplate();
+}
+```
+
+`retrieveByLoanId` is the primary lookup path used by enrichers at event-publish time.
+
+## Command bus integration
+
+Fineract uses a command/handler pattern where every mutation is wrapped in a `CommandWrapper` and dispatched through `PortfolioCommandSourceWritePlatformService`. Origination commands are annotated with `@CommandType(entity, action)`:
+
+| Handler class | Entity | Action |
+|---|---|---|
+| `CreateLoanOriginatorCommandHandler` | `LOAN_ORIGINATOR` | `CREATE` |
+| `UpdateLoanOriginatorCommandHandler` | `LOAN_ORIGINATOR` | `UPDATE` |
+| `DeleteLoanOriginatorCommandHandler` | `LOAN_ORIGINATOR` | `DELETE` |
+| `AttachLoanOriginatorCommandHandler` | `LOAN_ORIGINATOR` | `ATTACH` |
+| `DetachLoanOriginatorCommandHandler` | `LOAN_ORIGINATOR` | `DETACH` |
+
+Each handler delegates directly to `LoanOriginatorWritePlatformService`. Example:
+
+```java
+// fineract-loan-origination/.../handler/CreateLoanOriginatorCommandHandler.java
+@Service
+@CommandType(entity = "LOAN_ORIGINATOR", action = "CREATE")
+@ConditionalOnProperty(value = "fineract.module.loan-origination.enabled", havingValue = "true")
+public class CreateLoanOriginatorCommandHandler implements NewCommandSourceHandler {
+
+    private final LoanOriginatorWritePlatformService writePlatformService;
+
+    @Override
+    public CommandProcessingResult processCommand(final JsonCommand command) {
+        return this.writePlatformService.create(command);
+    }
+}
+```
+
+The `LoanApplicationOriginatorDataValidator` validates the originator identifier on the loan application payload; if the referenced originator does not exist or is not active, `LoanOriginatorNotActiveException` is thrown before the application is accepted.
+
+## REST API
+
+`LoanOriginatorApiResource` is mounted at `GET/POST /v1/loan-originators`. It is conditional on the feature flag:
+
+```java
+@Path("/v1/loan-originators")
+@Component
+@ConditionalOnProperty(value = "fineract.module.loan-origination.enabled", havingValue = "true")
+public class LoanOriginatorApiResource {
+    // POST   /v1/loan-originators          → create
+    // GET    /v1/loan-originators          → retrieveAll
+    // GET    /v1/loan-originators/template → retrieveTemplate
+    // GET    /v1/loan-originators/{id}     → retrieveById
+    // PUT    /v1/loan-originators/{id}     → update
+    // DELETE /v1/loan-originators/{id}     → delete
+}
+```
+
+`LoanOriginatorsApiResource` (plural) handles loan-specific attachment at `POST/DELETE /v1/loans/{loanId}/originators/{originatorId}`.
+
+## `DataEnricher` pattern
+
+The enricher pattern allows modules to augment Avro event payloads without coupling to the core event bus. The `DataEnricher<T>` interface (from `fineract-core`) requires:
+
+```java
+Class<T> getDataType();
+void enrich(T data);
+```
+
+The origination module registers five enrichers, all conditional on the feature flag:
+
+| Enricher | Data type enriched |
+|---|---|
+| `LoanAccountDataV1OriginatorEnricher` | `LoanAccountDataV1` |
+| `LoanAccountDelinquencyRangeDataV1OriginatorEnricher` | `LoanAccountDelinquencyRangeDataV1` |
+| `LoanChargeDataV1OriginatorEnricher` | `LoanChargeDataV1` |
+| `LoanRepaymentDueDataV1OriginatorEnricher` | `LoanRepaymentDueDataV1` |
+| `LoanTransactionDataV1OriginatorEnricher` | `LoanTransactionDataV1` |
+| `LoanTransactionAdjustmentDataV1OriginatorEnricher` | `LoanTransactionAdjustmentDataV1` |
+
+Each enricher resolves originator metadata via `LoanOriginatorDetailsResolver` and sets `OriginatorDetailsV1` on the payload before it is published to Kafka or another message broker. Example:
+
+```java
+// fineract-loan-origination/.../enricher/LoanAccountDataV1OriginatorEnricher.java
+@Component
+@ConditionalOnProperty(value = "fineract.module.loan-origination.enabled", havingValue = "true")
+public class LoanAccountDataV1OriginatorEnricher implements DataEnricher<LoanAccountDataV1> {
+
+    private final LoanOriginatorDetailsResolver loanOriginatorDetailsResolver;
+
+    @Override
+    public Class<LoanAccountDataV1> getDataType() {
+        return LoanAccountDataV1.class;
+    }
+
+    @Override
+    public void enrich(final LoanAccountDataV1 data) {
+        if (data == null || data.getId() == null) return;
+        final List<OriginatorDetailsV1> originators =
+            loanOriginatorDetailsResolver.resolveOriginatorDetails(data.getId());
+        if (!originators.isEmpty()) {
+            data.setOriginators(originators);
+        }
+    }
+}
+```
+
+`LoanOriginatorAvroMapper` maps from `LoanOriginatorData` to `OriginatorDetailsV1` (Avro-generated class), handling the type code conversion from `CodeValue`.
+
+## Exception types
+
+| Exception | Thrown when |
+|---|---|
+| `LoanOriginatorNotFoundException` | Requested originator ID does not exist |
+| `LoanOriginatorNotActiveException` | Originator is `INACTIVE`; cannot attach to new loans |
+| `LoanOriginatorDuplicateExternalIdException` | `externalId` already in use |
+| `LoanOriginatorMappingAlreadyExistsException` | Loan is already mapped to this originator |
+| `LoanOriginatorMappingNotFoundException` | Mapping to detach does not exist |
+| `LoanOriginatorCreationNotAllowedException` | Feature is disabled or rate-limiting rule violated |
+| `LoanNotInSubmittedStatusException` | Loan must be in `SUBMITTED_AND_PENDING_APPROVAL` to attach originator |
+
+## Enabling the module
+
+Add the following to `application.properties` or the Spring Boot configuration:
+
+```properties
+fineract.module.loan-origination.enabled=true
+```
+
+Without this flag, the module contributes no beans, no REST endpoints, and no enrichers. The `LoanOriginationModuleIsEnabledCondition` class (`fineract-loan-origination/.../config/`) encapsulates the Spring condition logic.
+
+## Related pages
+
+- [Loan Module](/loans/loan-module) — core domain entities
+- [Loan Lifecycle](/loans/loan-lifecycle) — `submitApplication` call that can accept originator metadata
+- [COB Pipeline](/loans/cob-close-of-business) — events enriched by originator data at publish time
